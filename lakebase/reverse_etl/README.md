@@ -9,9 +9,13 @@ This directory wires the two halves of the app's Lakebase data layer:
    segment overrides, and an audit trail **without touching read-only gold**.
 
 Everything is driven by config from `app/.env` (loaded by `_common.py`); no host
-names, catalog names, or secrets are hard-coded. Lakebase connections use a
-short-lived (~1h) Databricks OAuth token as the Postgres password — minted per
-run via the SDK, never stored or logged.
+names, catalog names, or secrets are hard-coded. The connection config
+(`PG_INSTANCE_NAME`, `PGDATABASE`, `PG_UC_CATALOG`, plus `PGHOST`,
+`CAPSTONE_CATALOG`, `CAPSTONE_SCHEMA`, `DATABRICKS_PROFILE`) is **required from
+the environment** — there are no committed operational defaults, so a missing
+value fails fast rather than silently targeting the wrong instance. Lakebase
+connections use a short-lived (~1h) Databricks OAuth token as the Postgres
+password — minted per run via the SDK, never stored or logged.
 
 ## Actual resources used (serverless sandbox)
 
@@ -107,7 +111,7 @@ notice and exits 0 — safe to run unconditionally in automation.
 | Script | What it does |
 |---|---|
 | `_common.py` | Shared config + Lakebase connection helper (OAuth token as password). |
-| `create_synced_tables.py` | Creates the 3 synced tables (idempotent), polls until each reaches a healthy sync state, and creates/updates the hourly refresh Job for `products_synced`. |
+| `create_synced_tables.py` | Creates the 3 synced tables (idempotent), polls until each reaches a healthy sync state, and creates/updates the hourly refresh Job for `products_synced`. **Fails loud:** exits non-zero if any synced table enters a terminal error state (exit 1) or the poll times out before all are healthy (exit 4); the required `products_synced` hourly refresh Job is guaranteed — it polls for the underlying pipeline id and exits non-zero (exit 5) rather than skipping the Job if it can't be obtained. |
 | `create_staging_tables.py` | Applies idempotent staging DDL and verifies columns via `information_schema`. |
 | `grant_app_sp.py` | Renders (`--dry-run`) or applies the SP grants; live run is guarded on role existence. |
 

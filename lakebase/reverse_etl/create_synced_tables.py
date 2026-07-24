@@ -157,20 +157,44 @@ def create_one(w, catalog: str, name: str, source: str, pks, policy, *, recreate
     )
 
 
+def _resolve_products_pipeline_id(w, catalog: str, timeout_s: int = 300, interval_s: int = 15) -> str:
+    """Return the underlying DLT pipeline_id for products_synced, polling until
+    it is populated (it can lag briefly after the synced table is created).
+
+    The hourly refresh is a REQUIRED T1 deliverable, so we do NOT skip when the
+    id is missing — we bounded-poll and, if it still can't be obtained, raise
+    ``SystemExit(5)`` so the run fails loud instead of exiting without the job.
+    """
+    deadline = time.time() + timeout_s
+    target = uc_target(catalog, "products_synced")
+    while True:
+        st = w.database.get_synced_database_table(target)
+        pipeline_id = (st.data_synchronization_status.pipeline_id
+                       if st.data_synchronization_status else None)
+        if pipeline_id:
+            return pipeline_id
+        if time.time() > deadline:
+            print(
+                f"[job] FAILED to obtain products_synced pipeline_id after {timeout_s}s. "
+                "The hourly refresh Job is a required deliverable and cannot be created "
+                "without it. Verify products_synced provisioned correctly, then re-run "
+                "this script (idempotent).")
+            raise SystemExit(5)
+        print(f"[job] products_synced pipeline_id not available yet — retrying in {interval_s}s")
+        time.sleep(interval_s)
+
+
 def ensure_hourly_trigger_job(w, catalog: str) -> None:
     """A TRIGGERED synced table has an underlying DLT pipeline that only
     refreshes when invoked. Schedule that refresh hourly via a Databricks Job
     with a quartz-cron trigger, so products_synced stays at most ~1h stale.
 
-    Idempotent: reuses the job if it already exists (matched by name).
+    Idempotent: reuses the job if it already exists (matched by name). Fails
+    loud (SystemExit) if the pipeline_id can never be resolved.
     """
     from databricks.sdk.service import jobs
 
-    st = w.database.get_synced_database_table(uc_target(catalog, "products_synced"))
-    pipeline_id = st.data_synchronization_status.pipeline_id if st.data_synchronization_status else None
-    if not pipeline_id:
-        print("[job] products_synced pipeline_id not available yet — skipping job creation")
-        return
+    pipeline_id = _resolve_products_pipeline_id(w, catalog)
 
     job_name = "capstone-products_synced-hourly-refresh"
     existing = next((j for j in w.jobs.list(name=job_name)), None)
@@ -195,26 +219,63 @@ def ensure_hourly_trigger_job(w, catalog: str) -> None:
 
 
 def wait_until_healthy(w, catalog: str, timeout_s: int = 1800) -> dict:
-    """Poll all synced tables until each reaches a healthy terminal state
-    (or timeout). Returns {name: detailed_state}."""
+    """Poll all synced tables until each reaches a healthy terminal state.
+
+    Fails LOUD — a synced table that never comes online must not read as success:
+
+    * If ANY table reaches a terminal error state (its detailed_state contains
+      ``FAILED`` / ``ERROR``), print which table(s) failed + their state and
+      raise ``SystemExit(1)``.
+    * If the poll reaches ``timeout_s`` without every table healthy, raise
+      ``SystemExit(4)`` with a distinct message.
+    * When every table is healthy, return ``{name: detailed_state}`` (exit 0).
+
+    Re-runnable: tables already healthy on a later run satisfy the loop
+    immediately and return normally (exit 0).
+    """
     deadline = time.time() + timeout_s
     names = [t[0] for t in SYNCED_TABLES]
     policy_by_name = {t[0]: t[3].value for t in SYNCED_TABLES}
     last: dict[str, str] = {}
     while True:
         done = True
+        failed: dict[str, str] = {}
         for name in names:
             st = w.database.get_synced_database_table(uc_target(catalog, name))
             state = (st.data_synchronization_status.detailed_state.value
                      if st.data_synchronization_status
                      and st.data_synchronization_status.detailed_state else "UNKNOWN")
             last[name] = state
-            if state not in _HEALTHY[policy_by_name[name]] and "FAILED" not in state:
+            if "FAILED" in state or "ERROR" in state:
+                failed[name] = state
+            elif state not in _HEALTHY[policy_by_name[name]]:
                 done = False
         stamp = ", ".join(f"{n}={last[n]}" for n in names)
         print(f"[wait] {stamp}")
-        if done or time.time() > deadline:
+
+        # Terminal error on any table — do not mask as success. Exit code 1.
+        if failed:
+            detail = ", ".join(f"{n}={s}" for n, s in failed.items())
+            print(
+                f"[FAILED] synced table(s) entered a terminal error state: {detail}. "
+                "Inspect the underlying pipeline in the workspace, fix the source, "
+                "and re-run (use --recreate to rebuild).")
+            raise SystemExit(1)
+
+        if done:
             return last
+
+        # Timed out before all tables were healthy — distinct exit code 4.
+        if time.time() > deadline:
+            unhealthy = ", ".join(
+                f"{n}={last[n]}" for n in names
+                if last[n] not in _HEALTHY[policy_by_name[n]])
+            print(
+                f"[TIMEOUT] synced tables not all healthy after {timeout_s}s; "
+                f"still pending: {unhealthy}. They may just need more time — "
+                "re-run this script (idempotent) to keep polling.")
+            raise SystemExit(4)
+
         time.sleep(20)
 
 

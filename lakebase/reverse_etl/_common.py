@@ -48,11 +48,14 @@ def profile() -> str:
 
 
 def pg_instance_name() -> str:
-    return env("PG_INSTANCE_NAME", "capstone-pg")
+    # Required from env (app/.env). No committed operational default: a missing
+    # value must fail fast rather than silently target some other instance.
+    return env("PG_INSTANCE_NAME", required=True)
 
 
 def pg_database() -> str:
-    return env("PGDATABASE", "capstone_db")
+    # Required from env (app/.env); no committed operational default.
+    return env("PGDATABASE", required=True)
 
 
 def pg_host() -> str:
@@ -63,8 +66,9 @@ def uc_source(table: str) -> str:
     """Fully-qualified gold source table name.
 
     NOTE: the spec writes ``<catalog>.gold.<table>`` generically, but in THIS
-    workspace the 5 gold tables live in ``<catalog>.<CAPSTONE_SCHEMA>`` (schema
-    ``lakebase_app_capstone``), not a schema literally named ``gold``.
+    workspace the gold tables live in ``<catalog>.<CAPSTONE_SCHEMA>`` — the
+    schema is read from ``CAPSTONE_SCHEMA`` (``app_capstone`` here), not a
+    schema literally named ``gold``.
     """
     catalog = env("CAPSTONE_CATALOG", required=True)
     schema = env("CAPSTONE_SCHEMA", required=True)
@@ -76,11 +80,11 @@ def pg_uc_catalog() -> str:
     created as ``<pg_uc_catalog>.public.<name>`` in UC, which surfaces in
     Postgres under database ``PGDATABASE`` / schema ``public``.
 
-    The serverless-sandbox catalog is ``suro_capstone_lb_sbx`` (bound to
-    instance ``capstone-pg`` / db ``capstone_db``). Do NOT use
-    ``capstone_lakebase`` — that is a different user's catalog on another
-    workspace and throws 'Cross workspace access is not allowed'."""
-    return env("PG_UC_CATALOG", "suro_capstone_lb_sbx")
+    Required from env (``PG_UC_CATALOG`` in app/.env); no committed operational
+    default. Note: the catalog must be bound to the SAME workspace/instance as
+    the configured Lakebase instance — a cross-workspace catalog raises
+    'Cross workspace access is not allowed'."""
+    return env("PG_UC_CATALOG", required=True)
 
 
 def workspace_client():
