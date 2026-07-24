@@ -73,6 +73,7 @@ def _overview() -> None:
 overview_page = st.Page(_overview, title="Overview", icon="🏠", default=True)
 customers_page = st.Page("pages/1_Customers.py", title="Customers", icon="📋")
 detail_page = st.Page("pages/2_Customer_Detail.py", title="Customer detail", icon="🔎")
+dashboard_page = st.Page("pages/3_Dashboard.py", title="Dashboard", icon="📊")
 
-nav = st.navigation([overview_page, customers_page, detail_page])
+nav = st.navigation([overview_page, customers_page, detail_page, dashboard_page])
 nav.run()

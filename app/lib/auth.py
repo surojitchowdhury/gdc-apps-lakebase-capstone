@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
-from pathlib import Path
 
 from databricks.sdk import WorkspaceClient
+
+from .config import host as _host  # shared env loading + typed host accessor
 
 # OBO scopes this app requests. These are the only platform-allowed scopes we
 # rely on: SQL warehouse access and the Genie API. Keep this in sync with the
@@ -38,35 +39,8 @@ OBO_SCOPES = ("sql", "dashboards.genie")
 _HDR_ACCESS_TOKEN = "X-Forwarded-Access-Token"
 _HDR_EMAIL = "X-Forwarded-Email"
 
-# --- Locate app/.env (this file lives at app/lib/auth.py) -------------------
-_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
-
-
-def _load_env() -> None:
-    """Load key=value pairs from ``app/.env`` into ``os.environ`` without
-    overriding values already set (the Apps runtime wins in production)."""
-    if not _ENV_FILE.exists():
-        return
-    for raw in _ENV_FILE.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip())
-
-
-_load_env()
-
-
-def _host() -> str:
-    """Databricks workspace host URL (from the environment)."""
-    host = os.environ.get("DATABRICKS_HOST")
-    if not host:
-        raise RuntimeError(
-            "DATABRICKS_HOST is not set. In production it is provided by the "
-            "Apps runtime; locally it is read from app/.env."
-        )
-    return host
+# Env loading (app/.env, without overriding the Apps runtime) is centralised in
+# :mod:`app.lib.config`, imported above; importing it runs ``load_env()`` once.
 
 
 def _headers() -> "dict[str, str] | None":
