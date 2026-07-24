@@ -27,6 +27,7 @@ import os
 from functools import lru_cache
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.core import Config
 
 from .config import host as _host  # shared env loading + typed host accessor
 
@@ -90,7 +91,10 @@ def obo_client() -> "WorkspaceClient | None":
     token = _header(_HDR_ACCESS_TOKEN)
     if not token:
         return None
-    return WorkspaceClient(host=_host(), token=token)
+    # Pin unified auth to PAT/token: the Apps runtime also injects OAuth SP
+    # credentials, but auth_type makes the SDK ignore those for this OBO client.
+    cfg = Config(host=_host(), token=token, auth_type="pat")
+    return WorkspaceClient(config=cfg)
 
 
 @lru_cache(maxsize=1)
