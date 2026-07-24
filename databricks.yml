@@ -61,7 +61,7 @@ variables:
     default: lakebase_sync_storage
   git_repo_url:
     description: GitHub repo the git-source app pulls its source from.
-    default: https://github.com/surojit-chowdhury_data/gdc-apps-lakebase-capstone
+    default: https://github.com/surojitchowdhury/gdc-apps-lakebase-capstone
   git_branch:
     description: Git branch the git-source app deploys from.
     default: main
