@@ -1,14 +1,19 @@
 # Databricks Apps runtime configuration for the Customer 360 Streamlit app.
 #
 # Schema: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/app-runtime
-#   command            — process the runtime starts (Streamlit entrypoint)
-#   env                — environment variables wired into the app process
-#   user_authorization — OBO (on-behalf-of-user) scopes requested for the app
+# app.yaml supports ONLY two keys: `command` and `env`. There is no
+# `user_authorization` / `user_api_scopes` key in the runtime schema — OBO
+# scopes are configured on the *app resource*, not here (see the note at the
+# bottom of this file and resources/app.yml).
 #
 # This app source directory IS app/, so streamlit_app.py is referenced relative
-# to this file (no path prefix). The Apps runtime injects the listening port via
-# $DATABRICKS_APP_PORT (defaults to 8000); we bind the same 8000 explicitly so
-# the two always agree.
+# to this file (no path prefix).
+#
+# PORT: Databricks Apps assigns the listening port dynamically and substitutes
+# the DATABRICKS_APP_PORT token into the command at runtime. Per the runtime
+# docs: "DATABRICKS_APP_PORT ... is substituted with the actual port number in
+# the command at runtime." Do NOT hardcode a port. --server.address 0.0.0.0 is
+# required so the app binds all interfaces behind the Apps proxy.
 #
 # SECRETS: none live here. Lakebase auth uses short-lived Databricks OAuth
 # tokens minted at runtime by the app service principal (see app/lib/db.py) and
@@ -21,11 +26,20 @@ command:
   - "run"
   - "streamlit_app.py"
   - "--server.port"
-  - "8000"
+  - "$DATABRICKS_APP_PORT"
   - "--server.address"
   - "0.0.0.0"
 
 env:
+  # --- Streamlit-on-Apps proxy settings --------------------------------------
+  # Required by the Databricks Streamlit-on-Apps guidance: the app runs behind
+  # the Apps reverse proxy, so Streamlit's own CORS + XSRF protection must be
+  # disabled or the WebSocket / proxy handshake fails.
+  - name: "STREAMLIT_SERVER_ENABLE_CORS"
+    value: "false"
+  - name: "STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION"
+    value: "false"
+
   # --- Static, non-secret config (literal values sourced from app/.env) -------
   # Lakebase (Postgres / OLTP) connection targets — read by app/lib/db.py.
   - name: "PGHOST"
@@ -71,23 +85,29 @@ env:
   # - name: "FORWARD_ETL_JOB_ID"
   #   valueFrom: "forward-etl-job"   # <-- resource name declared in resources/app.yml (T7/T8)
 
-# On-behalf-of-user (OBO) scopes. ONLY these two are listed:
-#   sql              — SQL warehouse queries as the calling user (app/lib/sql.py)
-#   dashboards.genie — Genie Conversation API as the calling user (app/lib/genie.py)
-# These MUST match OBO_SCOPES in app/lib/auth.py.
+# ---------------------------------------------------------------------------
+# OBO SCOPES ARE NOT CONFIGURED HERE.
+#
+# app.yaml (the runtime config) supports only `command` and `env`. On-behalf-of-
+# user scopes are a property of the *app resource*, declared as `user_api_scopes`
+# (list of strings, Public Preview) — verified via `databricks bundle schema`
+# (github.com/databricks/cli/bundle/config/resources.App -> user_api_scopes).
+#
+# For this app they must be exactly:
+#     user_api_scopes:
+#       - sql               # SQL warehouse queries as the calling user (app/lib/sql.py)
+#       - dashboards.genie  # Genie Conversation API as the calling user (app/lib/genie.py)
+# matching OBO_SCOPES in app/lib/auth.py. See resources/app.yml for the declared
+# app resource, and the PR body for where/how it is applied.
 #
 # The platform auto-adds iam.current-user:read and iam.access-control:read; do
-# NOT list them (or `dashboards` / `postgres`) explicitly — the Apps API rejects
-# extra/unsupported scopes. Lakebase is intentionally absent: it does not support
-# OBO and always runs as the app service principal (see app/lib/db.py).
+# NOT list them (or `dashboards` / `postgres`) — the Apps API rejects extra
+# scopes. Lakebase is intentionally absent: it does not support OBO and always
+# runs as the app service principal (see app/lib/db.py).
 #
-# PREREQUISITES (validated at deploy time — see the PR body):
+# DEPLOY-TIME PREREQUISITES (validated at deploy time — see the PR body):
 #   * The workspace OBO preview toggle must be ON
 #     (Settings -> Apps -> "User authorization (preview)"). Without it these
 #     scopes will not persist and X-Forwarded-Access-Token is never injected.
 #   * On first load each user is prompted for one-time consent on these scopes;
 #     OBO only carries through after they click Authorize.
-user_authorization:
-  scopes:
-    - "sql"
-    - "dashboards.genie"
