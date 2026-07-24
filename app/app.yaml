@@ -1,0 +1,93 @@
+# Databricks Apps runtime configuration for the Customer 360 Streamlit app.
+#
+# Schema: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/app-runtime
+#   command            — process the runtime starts (Streamlit entrypoint)
+#   env                — environment variables wired into the app process
+#   user_authorization — OBO (on-behalf-of-user) scopes requested for the app
+#
+# This app source directory IS app/, so streamlit_app.py is referenced relative
+# to this file (no path prefix). The Apps runtime injects the listening port via
+# $DATABRICKS_APP_PORT (defaults to 8000); we bind the same 8000 explicitly so
+# the two always agree.
+#
+# SECRETS: none live here. Lakebase auth uses short-lived Databricks OAuth
+# tokens minted at runtime by the app service principal (see app/lib/db.py) and
+# SQL/Genie use per-request user OBO tokens — there is NO Postgres password or
+# API token to configure. DATABRICKS_HOST and the SP OAuth credentials
+# (DATABRICKS_CLIENT_ID/SECRET) are provided by the Apps runtime, not here.
+
+command:
+  - "streamlit"
+  - "run"
+  - "streamlit_app.py"
+  - "--server.port"
+  - "8000"
+  - "--server.address"
+  - "0.0.0.0"
+
+env:
+  # --- Static, non-secret config (literal values sourced from app/.env) -------
+  # Lakebase (Postgres / OLTP) connection targets — read by app/lib/db.py.
+  - name: "PGHOST"
+    value: "ep-lucky-moon-d1e6mir6.database.us-west-2.cloud.databricks.com"
+  - name: "PGDATABASE"
+    value: "capstone_db"
+  - name: "PG_INSTANCE_NAME"
+    value: "capstone-pg"
+  # Lakebase UC catalog that fronts the Postgres instance (reverse-ETL / synced
+  # tables). Non-secret; included for completeness of the Lakebase config.
+  - name: "PG_UC_CATALOG"
+    value: "suro_capstone_lb_sbx"
+
+  # SQL warehouse used for OBO warehouse queries — read by app/lib/sql.py.
+  - name: "WAREHOUSE_ID"
+    value: "fe136bafc7c46e7a"
+
+  # AI/BI dashboard embedded on the Dashboard page — read by app/lib/config.py.
+  - name: "DASHBOARD_ID"
+    value: "01f187538c8a1eeca2d0c39e709a0a57"
+
+  # Genie space chatted against on the Genie page — read by app/lib/config.py.
+  - name: "GENIE_SPACE_ID"
+    value: "01f187538de014de98715e9a3f4853da"
+
+  # Workspace parent path for deployed assets (bundle / reverse-ETL context).
+  - name: "PARENT_PATH"
+    value: "/Workspace/Users/surojit.chowdhury@databricks.com/capstone"
+
+  # Delta gold source (UC) — catalog/schema read by app/lib/data.py.
+  - name: "CAPSTONE_CATALOG"
+    value: "suro_cat"
+  - name: "CAPSTONE_SCHEMA"
+    value: "app_capstone"
+
+  # --- Bundle-injected values (valueFrom) ------------------------------------
+  # FORWARD_ETL_JOB_ID is produced by the forward-ETL job declared in
+  # resources/app.yml during T7/T8. Once that job resource exists, uncomment the
+  # block below and point `valueFrom` at the app-resource name the bundle binds
+  # to that job (the SP forward-ETL trigger in app/lib/jobs.py reads this var).
+  # T6 does not depend on the resource existing, so it is left commented here.
+  #
+  # - name: "FORWARD_ETL_JOB_ID"
+  #   valueFrom: "forward-etl-job"   # <-- resource name declared in resources/app.yml (T7/T8)
+
+# On-behalf-of-user (OBO) scopes. ONLY these two are listed:
+#   sql              — SQL warehouse queries as the calling user (app/lib/sql.py)
+#   dashboards.genie — Genie Conversation API as the calling user (app/lib/genie.py)
+# These MUST match OBO_SCOPES in app/lib/auth.py.
+#
+# The platform auto-adds iam.current-user:read and iam.access-control:read; do
+# NOT list them (or `dashboards` / `postgres`) explicitly — the Apps API rejects
+# extra/unsupported scopes. Lakebase is intentionally absent: it does not support
+# OBO and always runs as the app service principal (see app/lib/db.py).
+#
+# PREREQUISITES (validated at deploy time — see the PR body):
+#   * The workspace OBO preview toggle must be ON
+#     (Settings -> Apps -> "User authorization (preview)"). Without it these
+#     scopes will not persist and X-Forwarded-Access-Token is never injected.
+#   * On first load each user is prompted for one-time consent on these scopes;
+#     OBO only carries through after they click Authorize.
+user_authorization:
+  scopes:
+    - "sql"
+    - "dashboards.genie"
