@@ -1,0 +1,79 @@
+# Databricks Asset Bundle — declarative synced-table specs (reverse ETL, T1).
+#
+# T8: the YAML equivalent of T1's psycopg/SDK-created synced tables, so the three
+# reverse-ETL synced tables are BUNDLE-MANAGED and don't drift from ad-hoc
+# creation. CLI v1.6.0 has a native `synced_database_tables` resource type
+# (verified via `databricks bundle schema`:
+#   resources.SyncedDatabaseTable {name, database_instance_name,
+#     logical_database_name, spec: database.SyncedTableSpec}
+#   spec.scheduling_policy enum: CONTINUOUS | TRIGGERED | SNAPSHOT
+#   spec.new_pipeline_spec {storage_catalog, storage_schema}).
+#
+# So we DON'T need to fall back to referencing create_synced_tables.py — the
+# native resource type validates. Mirrors the T1 script exactly:
+#   customers_synced     <- gold.customers     CONTINUOUS
+#   transactions_synced  <- gold.transactions  CONTINUOUS
+#   products_synced      <- gold.products      TRIGGERED (hourly, slow-changing)
+#
+# The synced tables land in the Lakebase-registered UC catalog (pg_uc_catalog),
+# surfaced in Postgres db=capstone_db / schema=public. Each table's backing DLT
+# pipeline writes its event-log + staging to a SEPARATE storage-backed catalog
+# via new_pipeline_spec.storage_catalog/_schema — this is the T1 fix that made
+# the tables come ONLINE (pg_uc_catalog is connection-backed with no storage
+# root, so without it the pipeline fails UNITY_CATALOG_INITIALIZATION_FAILED).
+#
+# NOTE ON THE HOURLY REFRESH: the T1 script also created a separate Job with a
+# quartz-cron trigger to refresh products_synced hourly (a TRIGGERED synced
+# table's pipeline only runs when invoked). That trigger job depends on the
+# pipeline_id, which only exists AFTER the synced table is provisioned, so it is
+# NOT expressed here (it can't reference a not-yet-created pipeline at validate
+# time). It remains a post-deploy step: run create_synced_tables.py once (it
+# reuses the existing tables and (re)creates the hourly refresh job), or add a
+# jobs.yml pipeline_task once the pipeline id is known.
+
+resources:
+  synced_database_tables:
+    # --- CONTINUOUS: app must reflect churn/LTV/new-txn within seconds --------
+    customers_synced:
+      name: ${var.pg_uc_catalog}.public.customers_synced
+      database_instance_name: ${var.lakebase_instance}
+      logical_database_name: ${var.lakebase_database}
+      spec:
+        source_table_full_name: ${var.catalog}.${var.schema}.customers
+        primary_key_columns:
+          - customer_id
+        scheduling_policy: CONTINUOUS
+        create_database_objects_if_missing: true
+        new_pipeline_spec:
+          storage_catalog: ${var.pg_sync_storage_catalog}
+          storage_schema: ${var.pg_sync_storage_schema}
+
+    transactions_synced:
+      name: ${var.pg_uc_catalog}.public.transactions_synced
+      database_instance_name: ${var.lakebase_instance}
+      logical_database_name: ${var.lakebase_database}
+      spec:
+        source_table_full_name: ${var.catalog}.${var.schema}.transactions
+        primary_key_columns:
+          - transaction_id
+        scheduling_policy: CONTINUOUS
+        create_database_objects_if_missing: true
+        new_pipeline_spec:
+          storage_catalog: ${var.pg_sync_storage_catalog}
+          storage_schema: ${var.pg_sync_storage_schema}
+
+    # --- TRIGGERED: slow-changing catalog (200 rows); hourly is plenty --------
+    # Cheaper than an always-on pipeline. See the hourly-refresh note above.
+    products_synced:
+      name: ${var.pg_uc_catalog}.public.products_synced
+      database_instance_name: ${var.lakebase_instance}
+      logical_database_name: ${var.lakebase_database}
+      spec:
+        source_table_full_name: ${var.catalog}.${var.schema}.products
+        primary_key_columns:
+          - product_id
+        scheduling_policy: TRIGGERED
+        create_database_objects_if_missing: true
+        new_pipeline_spec:
+          storage_catalog: ${var.pg_sync_storage_catalog}
+          storage_schema: ${var.pg_sync_storage_schema}

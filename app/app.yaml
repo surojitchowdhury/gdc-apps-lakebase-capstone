@@ -76,14 +76,13 @@ env:
     value: "app_capstone"
 
   # --- Bundle-injected values (valueFrom) ------------------------------------
-  # FORWARD_ETL_JOB_ID is produced by the forward-ETL job declared in
-  # resources/app.yml during T7/T8. Once that job resource exists, uncomment the
-  # block below and point `valueFrom` at the app-resource name the bundle binds
-  # to that job (the SP forward-ETL trigger in app/lib/jobs.py reads this var).
-  # T6 does not depend on the resource existing, so it is left commented here.
-  #
-  # - name: "FORWARD_ETL_JOB_ID"
-  #   valueFrom: "forward-etl-job"   # <-- resource name declared in resources/app.yml (T7/T8)
+  # FORWARD_ETL_JOB_ID is bound by the bundle (T8): resources/app.yml declares an
+  # app resource named "forward-etl-job" pointing at the bundle-managed forward-
+  # ETL job (resources/jobs.yml). At deploy time the Apps runtime resolves this
+  # `valueFrom` to that job's id and injects it as FORWARD_ETL_JOB_ID, which the
+  # SP forward-ETL trigger in app/lib/jobs.py reads. No hard-coded job id.
+  - name: "FORWARD_ETL_JOB_ID"
+    valueFrom: "forward-etl-job"   # <-- resource name declared in resources/app.yml
 
 # ---------------------------------------------------------------------------
 # OBO SCOPES ARE NOT CONFIGURED HERE.

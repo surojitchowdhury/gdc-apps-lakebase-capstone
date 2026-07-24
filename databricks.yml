@@ -1,0 +1,86 @@
+# Databricks Asset Bundle — root config for the Customer 360 Lakebase capstone.
+#
+# T8: this bundle deploys the Streamlit app as a **git-source app** (source is
+# pulled from GitHub at `bundle run`, NOT uploaded from a workspace folder),
+# plus the forward-ETL job (T7) and the reverse-ETL synced tables (T1) as
+# bundle-managed resources so they don't drift from ad-hoc creation.
+#
+# Verified with CLI v1.6.0: `databricks bundle validate --target prod` passes.
+# The live deploy (bundle deploy / run + the SP-bound git credential + the OBO
+# preview toggle + the dashboard embed allowlist) is a separate, human-gated
+# step — see the T8 PR body and the README notes.
+
+bundle:
+  name: customer360-capstone
+
+# Resource definitions live under resources/*.yml (app, jobs, synced tables).
+include:
+  - resources/*.yml
+
+# --- Variables --------------------------------------------------------------
+# Defaults are the literal capstone-sandbox values (sourced from app/.env, which
+# is gitignored and never committed). Override per-target or on the CLI with
+# `--var`. Wired into resources via ${var.*}.
+variables:
+  warehouse_id:
+    description: SQL warehouse id for OBO warehouse queries (app/lib/sql.py).
+    default: fe136bafc7c46e7a
+  lakebase_instance:
+    description: Lakebase (Postgres) instance name the app connects to.
+    default: capstone-pg
+  lakebase_database:
+    description: Lakebase Postgres logical database name.
+    default: capstone_db
+  lakebase_host:
+    description: Lakebase Postgres host (used by the forward-ETL job param).
+    default: ep-lucky-moon-d1e6mir6.database.us-west-2.cloud.databricks.com
+  dashboard_id:
+    description: AI/BI dashboard embedded on the Dashboard page.
+    default: 01f187538c8a1eeca2d0c39e709a0a57
+  genie_space_id:
+    description: Genie space chatted against on the Genie page.
+    default: 01f187538de014de98715e9a3f4853da
+  catalog:
+    description: Gold UC catalog (Delta source + forward-ETL target).
+    default: suro_cat
+  schema:
+    description: Gold UC schema.
+    default: app_capstone
+  pg_uc_catalog:
+    description: Lakebase-registered UC catalog fronting the Postgres instance.
+    default: suro_capstone_lb_sbx
+  pg_sync_storage_catalog:
+    description: >-
+      Storage-backed UC catalog for the synced tables' backing DLT pipeline
+      metadata. PG_UC_CATALOG is connection-backed with no storage root, so the
+      pipeline must write its event-log + staging here (the T1 "storage_catalog"
+      fix that made the synced tables come ONLINE).
+    default: suro_serverless_sandbox_24july_catalog
+  pg_sync_storage_schema:
+    description: Storage schema for the synced tables' backing DLT pipeline metadata.
+    default: lakebase_sync_storage
+  git_repo_url:
+    description: GitHub repo the git-source app pulls its source from.
+    default: https://github.com/surojit-chowdhury_data/gdc-apps-lakebase-capstone
+  git_branch:
+    description: Git branch the git-source app deploys from.
+    default: main
+
+# --- Targets ----------------------------------------------------------------
+# Both point at the same sandbox host for now (the capstone has a single
+# workspace). `prod` is the default/primary target; `dev` differs only in name +
+# mode so an isolated dev deploy is possible without touching prod resources.
+targets:
+  dev:
+    mode: development
+    workspace:
+      host: https://fe-sandbox-suro-serverless-sandbox-24july.cloud.databricks.com
+
+  prod:
+    mode: production
+    default: true
+    workspace:
+      host: https://fe-sandbox-suro-serverless-sandbox-24july.cloud.databricks.com
+      # production mode requires an explicit root_path so exactly one copy is
+      # deployed (not scoped to the deploying user's dev namespace).
+      root_path: /Workspace/Users/surojit.chowdhury@databricks.com/.bundle/${bundle.name}/${bundle.target}

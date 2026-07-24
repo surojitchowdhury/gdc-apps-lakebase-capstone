@@ -1,0 +1,40 @@
+# Databricks Asset Bundle — the forward-ETL job (T7, Pattern A).
+#
+# T8 makes this job a BUNDLE-MANAGED resource (the source of truth going
+# forward). T7 created an equivalent job ad hoc via
+# lakebase/forward_etl/pattern_a_psycopg2/create_job.py (job_id 139812673079227);
+# the bundle-managed job supersedes it. resources/app.yml binds the app's
+# FORWARD_ETL_JOB_ID to ${resources.jobs.forward_etl.id}, so the app always
+# points at the bundle-managed job's id.
+#
+# Serverless compute: the notebook task carries no job/task cluster and no
+# `environment_key`, so it runs on serverless (matching create_job.py). The
+# notebook itself %pip installs psycopg at runtime (see forward_etl.py cell 0).
+#
+# base_parameters mirror the notebook's dbutils.widgets (catalog, schema,
+# pg_instance, pg_database, pg_host), wired from ${var.*}.
+
+resources:
+  jobs:
+    forward_etl:
+      name: capstone-forward-etl
+      description: >-
+        Forward ETL (Pattern A) — psycopg + MERGE INTO Delta. Promotes app-written
+        Lakebase staging rows (customer_notes, customer_segment_overrides) into UC
+        gold Delta tables. Triggered on demand from the Streamlit Reports page.
+      max_concurrent_runs: 1
+      tags:
+        capstone: forward-etl
+        pattern: A-psycopg-merge
+      tasks:
+        - task_key: forward_etl
+          notebook_task:
+            # Path relative to the bundle root (databricks.yml lives in
+            # capstone-app/). The bundle uploads this notebook on `bundle deploy`.
+            notebook_path: ../lakebase/forward_etl/pattern_a_psycopg2/forward_etl.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              pg_instance: ${var.lakebase_instance}
+              pg_database: ${var.lakebase_database}
+              pg_host: ${var.lakebase_host}
