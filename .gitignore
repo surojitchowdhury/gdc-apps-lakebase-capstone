@@ -8,4 +8,5 @@ node_modules/
 app/backend/static/
 dist/
 build/
+*.egg-info/
 *.log
