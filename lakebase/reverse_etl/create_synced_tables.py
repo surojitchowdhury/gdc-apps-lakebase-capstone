@@ -315,8 +315,14 @@ def main() -> None:
     for name, source, pks, policy in SYNCED_TABLES:
         create_one(w, catalog, name, source, pks, policy, recreate=args.recreate)
 
+    # --no-wait skips only the (long) synced-table HEALTH poll — never the
+    # hourly refresh Job, which is a required T1 deliverable. So on every
+    # successful create path we still call ensure_hourly_trigger_job(); it
+    # bounded-polls for the pipeline id (SystemExit(5) if unobtainable) rather
+    # than silently skipping the Job.
     if args.no_wait:
-        print("[done] created (skipping wait)")
+        print("[done] created (skipping health poll)")
+        ensure_hourly_trigger_job(w, catalog)
         return
 
     final = wait_until_healthy(w, catalog)

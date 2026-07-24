@@ -120,7 +120,8 @@ notice and exits 0 — safe to run unconditionally in automation.
 ```bash
 # from repo root; env comes from app/.env
 
-# 1. Synced tables (creates + waits for healthy; --recreate to rebuild, --no-wait to skip polling)
+# 1. Synced tables (creates + waits for healthy; --recreate to rebuild).
+#    --no-wait skips only the health poll — the products_synced hourly refresh Job is STILL created.
 uv run lakebase/reverse_etl/create_synced_tables.py
 
 # 2. Staging tables (idempotent)
