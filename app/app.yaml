@@ -22,13 +22,8 @@
 # (DATABRICKS_CLIENT_ID/SECRET) are provided by the Apps runtime, not here.
 
 command:
-  - "streamlit"
-  - "run"
-  - "streamlit_app.py"
-  - "--server.port"
-  - "$DATABRICKS_APP_PORT"
-  - "--server.address"
-  - "0.0.0.0"
+  - "python"
+  - "diagnostic_preflight.py"
 
 env:
   # --- Streamlit-on-Apps proxy settings --------------------------------------
