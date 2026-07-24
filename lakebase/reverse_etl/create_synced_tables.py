@@ -8,10 +8,17 @@
 Idempotent & re-runnable: if a synced table already exists it is left in place
 (we only report its status). Run with ``--recreate`` to drop & recreate.
 
-Synced tables (UC name -> source, mode) in catalog suro_capstone_lb_sbx:
-  suro_capstone_lb_sbx.public.customers_synced     <- gold.customers     CONTINUOUS
-  suro_capstone_lb_sbx.public.transactions_synced  <- gold.transactions  CONTINUOUS
-  suro_capstone_lb_sbx.public.products_synced      <- gold.products      TRIGGERED (hourly)
+Synced tables (UC name -> source, mode) in the Lakebase database catalog
+(PG_UC_CATALOG); surfaced in Postgres db=PGDATABASE / schema=public:
+  <PG_UC_CATALOG>.public.customers_synced     <- gold.customers     CONTINUOUS
+  <PG_UC_CATALOG>.public.transactions_synced  <- gold.transactions  CONTINUOUS
+  <PG_UC_CATALOG>.public.products_synced      <- gold.products      TRIGGERED (hourly)
+
+Each synced table's backing DLT pipeline writes its event-log + staging tables
+to a SEPARATE storage-backed catalog (PG_SYNC_STORAGE_CATALOG /
+PG_SYNC_STORAGE_SCHEMA), because the Lakebase database catalog is
+connection-backed with no storage root. Without this the pipeline fails with
+UNITY_CATALOG_INITIALIZATION_FAILED / PERMISSION_DENIED 403 credentialName=None.
 
 --- Sync-mode rationale (see README.md) -----------------------------------
 customers & transactions are CONTINUOUS: the app must reflect upstream churn
@@ -38,6 +45,7 @@ import time
 from databricks.sdk.errors import NotFound, PermissionDenied
 from databricks.sdk.service.database import (
     DatabaseCatalog,
+    NewPipelineSpec,
     SyncedDatabaseTable,
     SyncedTableSchedulingPolicy,
     SyncedTableSpec,
@@ -140,13 +148,24 @@ def create_one(w, catalog: str, name: str, source: str, pks, policy, *, recreate
     except (NotFound, PermissionDenied):
         pass
 
+    # The backing DLT pipeline writes its event-log + staging tables to a
+    # storage-backed catalog (NewPipelineSpec.storage_catalog/_schema). The
+    # Lakebase database catalog (PG_UC_CATALOG) is connection-backed with NO
+    # storage root, so without this the pipeline fails with
+    # UNITY_CATALOG_INITIALIZATION_FAILED / 403 credentialName=None. The synced
+    # table itself still lands in PG_UC_CATALOG and stays Postgres-queryable.
     spec = SyncedTableSpec(
         source_table_full_name=src_full,
         primary_key_columns=list(pks),
         scheduling_policy=policy,
         create_database_objects_if_missing=True,
+        new_pipeline_spec=NewPipelineSpec(
+            storage_catalog=C.pg_sync_storage_catalog(),
+            storage_schema=C.pg_sync_storage_schema(),
+        ),
     )
-    print(f"[{name}] creating {policy.value} synced table <- {src_full}")
+    print(f"[{name}] creating {policy.value} synced table <- {src_full} "
+          f"(pipeline storage: {C.pg_sync_storage_catalog()}.{C.pg_sync_storage_schema()})")
     w.database.create_synced_database_table(
         SyncedDatabaseTable(
             name=target,

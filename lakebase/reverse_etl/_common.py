@@ -87,6 +87,32 @@ def pg_uc_catalog() -> str:
     return env("PG_UC_CATALOG", required=True)
 
 
+def pg_sync_storage_catalog() -> str:
+    """Storage-backed UC catalog for the synced tables' backing DLT pipeline
+    METADATA (event log + staging tables).
+
+    A Lakebase *database catalog* (``PG_UC_CATALOG``) is connection-backed and
+    has NO storage root, so a synced table's DLT pipeline has nowhere to write
+    its metadata and fails with ``UNITY_CATALOG_INITIALIZATION_FAILED`` /
+    ``PERMISSION_DENIED 403 credentialName=None``. The synced table itself still
+    lives in ``PG_UC_CATALOG`` (and stays queryable from Lakebase Postgres); we
+    only redirect the pipeline's staging/metadata to a storage-backed
+    ``MANAGED_CATALOG`` via ``SyncedTableSpec.new_pipeline_spec`` (SDK field
+    ``NewPipelineSpec.storage_catalog`` / ``storage_schema``).
+
+    Required from env (``PG_SYNC_STORAGE_CATALOG`` in app/.env); no committed
+    operational default. Must be a storage-backed catalog (has a storage_root)
+    in the SAME workspace as the Lakebase instance."""
+    return env("PG_SYNC_STORAGE_CATALOG", required=True)
+
+
+def pg_sync_storage_schema() -> str:
+    """Schema under :func:`pg_sync_storage_catalog` that holds the backing
+    pipeline's staging/metadata tables. Required from env
+    (``PG_SYNC_STORAGE_SCHEMA`` in app/.env); no committed operational default."""
+    return env("PG_SYNC_STORAGE_SCHEMA", required=True)
+
+
 def workspace_client():
     """Build a WorkspaceClient bound to the configured CLI profile."""
     from databricks.sdk import WorkspaceClient

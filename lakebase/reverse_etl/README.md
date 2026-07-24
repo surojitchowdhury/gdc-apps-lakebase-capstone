@@ -10,83 +10,98 @@ This directory wires the two halves of the app's Lakebase data layer:
 
 Everything is driven by config from `app/.env` (loaded by `_common.py`); no host
 names, catalog names, or secrets are hard-coded. The connection config
-(`PG_INSTANCE_NAME`, `PGDATABASE`, `PG_UC_CATALOG`, plus `PGHOST`,
-`CAPSTONE_CATALOG`, `CAPSTONE_SCHEMA`, `DATABRICKS_PROFILE`) is **required from
-the environment** — there are no committed operational defaults, so a missing
-value fails fast rather than silently targeting the wrong instance. Lakebase
-connections use a short-lived (~1h) Databricks OAuth token as the Postgres
-password — minted per run via the SDK, never stored or logged.
+(`PG_INSTANCE_NAME`, `PGDATABASE`, `PG_UC_CATALOG`, `PG_SYNC_STORAGE_CATALOG`,
+`PG_SYNC_STORAGE_SCHEMA`, plus `PGHOST`, `CAPSTONE_CATALOG`, `CAPSTONE_SCHEMA`,
+`DATABRICKS_PROFILE`) is **required from the environment** — there are no
+committed operational defaults, so a missing value fails fast rather than
+silently targeting the wrong instance. Lakebase connections use a short-lived
+(~1h) Databricks OAuth token as the Postgres password — minted per run via the
+SDK, never stored or logged.
 
-## Actual resources used (`fevm-suro-aws-classic-stable-ztrhpi`)
+### Required env keys (in `app/.env`, never committed)
+
+| Key | Purpose |
+|---|---|
+| `PG_INSTANCE_NAME` | Lakebase Postgres instance (`capstone-pg`) |
+| `PGDATABASE` | Postgres database the synced tables surface in (`capstone_db`) |
+| `PG_UC_CATALOG` | Lakebase **database catalog** — the synced tables' UC target (`suro_capstone_lb_sbx`). Connection-backed, **no storage root**. |
+| `PG_SYNC_STORAGE_CATALOG` | **Storage-backed** UC catalog for the backing DLT pipeline's event-log + staging metadata (`suro_serverless_sandbox_24july_catalog`, `MANAGED_CATALOG`, `storage_root=s3://…`). |
+| `PG_SYNC_STORAGE_SCHEMA` | Schema under `PG_SYNC_STORAGE_CATALOG` for pipeline metadata (`lakebase_sync_storage`). |
+| `PGHOST`, `CAPSTONE_CATALOG`, `CAPSTONE_SCHEMA`, `DATABRICKS_PROFILE` | Connection + gold-source config. |
+
+### Storage-backed backing pipeline — the synced-table fix
+
+A Lakebase synced table is backed by a Lakeflow (DLT) pipeline that copies
+gold → Postgres. That pipeline needs to write its **event log + staging tables**
+to a UC location with a real storage root. The Lakebase **database catalog**
+(`PG_UC_CATALOG`) is *connection-backed* — it maps to Postgres and has **no
+storage root** — so a pipeline told to write metadata there fails at startup:
+
+```
+[UNITY_CATALOG_INITIALIZATION_FAILED] … PERMISSION_DENIED: Access denied.
+Cause: 403 Forbidden error from cloud storage provider. credentialName = None
+```
+
+The fix decouples the two locations via
+`SyncedTableSpec.new_pipeline_spec` (SDK: `databricks.sdk.service.database.NewPipelineSpec`):
+
+- **Synced table target** stays in `PG_UC_CATALOG.public.<name>` → still surfaces
+  in Lakebase Postgres (`PGDATABASE` / schema `public`) exactly as before, so the
+  app's data layer is **unchanged**.
+- **Pipeline metadata** is redirected to a storage-backed catalog via
+  `NewPipelineSpec(storage_catalog=PG_SYNC_STORAGE_CATALOG, storage_schema=PG_SYNC_STORAGE_SCHEMA)`.
+
+This is the documented pattern for a synced table on a managed/storage-backed
+catalog ("If creating a new pipeline and using a managed catalog, choose the
+storage location for the staging table" —
+<https://docs.databricks.com/aws/en/oltp/sync-data/sync-table>).
+
+## Actual resources used (`fe-sandbox-24july` — serverless sandbox)
 
 | Thing | Value |
 |---|---|
-| CLI profile | `fevm-suro-aws-classic-stable-ztrhpi` (AWS, us-east-1) |
-| Lakebase instance | `capstone-pg` (CU_1, PG 16, AVAILABLE) — **owned by the user** |
-| Postgres database | `capstone_db` (verified reachable — `SELECT version()` → PostgreSQL 16.14) |
-| **UC database catalog** | **DEFERRED** — no database catalog exists in this workspace; registration is blocked (see below) |
-| Gold source tables | `suro_aws_classic_stable_ztrhpi_catalog.lakebase_app_capstone.{customers,transactions,products}` (MANAGED DELTA) |
+| CLI profile | `fe-sandbox-24july` (serverless sandbox) |
+| Lakebase instance | `capstone-pg` — **owned by the user** |
+| Postgres database | `capstone_db` |
+| **UC database catalog** (synced-table target) | `suro_capstone_lb_sbx` — connection-backed, registered against `capstone-pg`, **no storage root** |
+| **Pipeline storage catalog** | `suro_serverless_sandbox_24july_catalog` (`MANAGED_CATALOG`, `storage_root=s3://suro-serverless-sandbox-24july-ext-s3-…/`), schema `lakebase_sync_storage` |
+| Gold source tables | `suro_cat.app_capstone.{customers,transactions,products}` (MANAGED DELTA, CDF enabled) |
 | Secret scope | `capstone-surojit-chowdhury` |
 
-### Catalog investigation — `suro_test_cat` and the synced-table decision
+### Root cause of the earlier failure & the fix
 
-Synced tables must live in a UC **database catalog** (one registered against a
-Lakebase Postgres instance). `suro_test_cat` was investigated first; findings are
-grounded in `databricks catalogs get/list` and `database get-database-catalog`:
+The three synced tables were originally created in the Lakebase database catalog
+`suro_capstone_lb_sbx` with the backing DLT pipeline defaulting its metadata to
+that same connection-backed catalog. That catalog has **no storage root**, so
+all three pipelines failed with
+`UNITY_CATALOG_INITIALIZATION_FAILED` / `PERMISSION_DENIED 403 credentialName=None`
+and the tables went `SYNCED_TABLE_OFFLINE_FAILED`.
 
-- **`suro_test_cat` exists**, owner `aec5be3d-de3c-404c-8e60-feed0f265fd3`
-  (a service principal). Its `catalog_type` is **`MANAGED_CATALOG`** — an
-  ordinary S3-backed UC catalog (an "Ontos UK motor insurance" demo with schemas
-  `claims`, `customer`, …). It is **NOT** a Lakebase database catalog and is
-  **not registered to any Postgres instance**, so it **cannot host synced
-  tables**.
-- A workspace-wide `catalogs list` shows **no database catalog at all** — every
-  catalog is `MANAGED_CATALOG` / `DELTASHARING_CATALOG` / `SYSTEM_CATALOG`.
-- Registering a **new** database catalog against `capstone-pg`
-  (`databricks database create-database-catalog suro_capstone_lb capstone-pg
-  capstone_db --create-database-if-not-exists`) fails with
-  **`User does not have CREATE CATALOG on Metastore 'metastore_aws_us_east_1'`**.
-  The metastore is owned by the `metastore_admins` group; the user owns the
-  *instance* but not the metastore privilege registration requires.
+The fix (see **Storage-backed backing pipeline** above) keeps the synced tables
+in `suro_capstone_lb_sbx` (so they stay Lakebase-Postgres-readable) but redirects
+each backing pipeline's event-log + staging metadata to the storage-backed
+catalog `suro_serverless_sandbox_24july_catalog.lakebase_sync_storage` via
+`SyncedTableSpec.new_pipeline_spec`.
 
-**Decision — synced tables are DEFERRED (decision-tree branch 4).** Every path to
-a database catalog is genuinely blocked without a metastore admin. Staging
-tables and grants (which need only a direct Postgres connection) are fully
-delivered; the synced-table script is idempotent and provisions the three tables
-the moment a database catalog exists.
+The pipeline **run-as identity** is `surojit.chowdhury@databricks.com`, who
+**owns** `suro_cat`, so `SELECT` on `suro_cat.app_capstone.*` is inherently
+satisfied — no extra grant was required. (If a different run-as identity is used,
+grant it `SELECT` on the three gold tables; `suro_cat` grants only `BROWSE` to
+account users.)
 
-> **Do not** use `capstone_lakebase` — that name is bound to a *different*
-> workspace and the user lacks `CREATE CATALOG` to register it here. The intended
-> catalog for this instance is **`suro_capstone_lb`** (`PG_UC_CATALOG` in
-> `app/.env`); synced tables would land in `suro_capstone_lb.public.<name>`,
-> surfacing in Postgres under database `capstone_db`, schema `public`.
-
-### Synced tables — DEFERRED (single unblock step)
-
-`create_synced_tables.py` detects the missing database catalog and exits **3**
-with a clean `[DEFERRED]` message (it does **not** fail loud — a metastore-admin
-prerequisite is an expected environment state, not a script bug). To unblock,
-**a metastore admin** registers the database catalog once:
+To (re)create + poll to healthy (idempotent; `--recreate` drops & rebuilds):
 
 ```bash
-databricks database create-database-catalog suro_capstone_lb capstone-pg capstone_db \
-    --create-database-if-not-exists -p fevm-suro-aws-classic-stable-ztrhpi
-```
-
-Then re-run the (unchanged, idempotent) script and the three synced tables
-provision + poll to healthy:
-
-```bash
-uv run lakebase/reverse_etl/create_synced_tables.py
+uv run lakebase/reverse_etl/create_synced_tables.py [--recreate]
 ```
 
 ## Synced tables
 
 | Synced table | Source (gold) | PK | Sync mode |
 |---|---|---|---|
-| `customers_synced` | `…ztrhpi_catalog.lakebase_app_capstone.customers` | `customer_id` | **CONTINUOUS** |
-| `transactions_synced` | `…ztrhpi_catalog.lakebase_app_capstone.transactions` | `transaction_id` | **CONTINUOUS** |
-| `products_synced` | `…ztrhpi_catalog.lakebase_app_capstone.products` | `product_id` | **TRIGGERED** (hourly) |
+| `customers_synced` | `suro_cat.app_capstone.customers` | `customer_id` | **CONTINUOUS** |
+| `transactions_synced` | `suro_cat.app_capstone.transactions` | `transaction_id` | **CONTINUOUS** |
+| `products_synced` | `suro_cat.app_capstone.products` | `product_id` | **TRIGGERED** (hourly) |
 
 All three gold sources have Change Data Feed enabled
 (`delta.enableChangeDataFeed = true`, verified via `databricks tables get`),
