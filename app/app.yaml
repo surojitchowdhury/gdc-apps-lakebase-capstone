@@ -60,6 +60,11 @@ env:
   # AI/BI dashboard embedded on the Dashboard page — read by app/lib/config.py.
   - name: "DASHBOARD_ID"
     value: "01f187538c8a1eeca2d0c39e709a0a57"
+  # Numeric org/workspace id consumed by @databricks/aibi-client. The Apps
+  # runtime also injects this value; declaring it makes the runtime contract
+  # explicit and keeps local/deployed configuration consistent.
+  - name: "DATABRICKS_WORKSPACE_ID"
+    value: "7474649012461888"
 
   # Genie space chatted against on the Genie page — read by app/lib/config.py.
   - name: "GENIE_SPACE_ID"

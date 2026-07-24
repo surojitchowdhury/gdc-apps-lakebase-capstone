@@ -1,37 +1,46 @@
-"""Dashboard page — embeds the AI/BI (Lakeview) dashboard in an iframe.
+"""Dashboard page using Databricks external-user AI/BI embedding.
 
-Reps get broader analytics in-app without leaving for the workspace UI. The
-supported integration is an iframe embed of the published dashboard:
-
-    {host}/embed/dashboardsv3/{dashboard_id}
-
-Host + dashboard id come from :mod:`app.lib.config` (env, loaded from app/.env
-locally / injected by the Apps runtime in production). If ``DASHBOARD_ID`` is
-unset we show a clear warning instead of rendering a broken iframe.
-
-IMPORTANT (deploy-time, T8): the embed is blocked by ``X-Frame-Options`` until
-the app's domain is ALLOWLISTED in the workspace:
-
-    Settings → Security → External Access → Embed Dashboard →
-    add the app host (e.g. customer360-<workspace>.databricksapps.com)
-
-That is a one-time workspace-admin UI step, only relevant once the app is
-deployed. It cannot be done from application code and does not block local dev.
+Basic ``/embed/dashboardsv3`` iframes cannot authenticate from the
+``databricksapps.com`` origin because workspace session cookies are not sent
+cross-origin. This page instead mints a short-lived, dashboard-scoped token
+with the App service principal and passes it to ``@databricks/aibi-client``.
 """
 
 from __future__ import annotations
 
+import json
+
 import streamlit as st
 
 from lib import config
+from lib.dashboard_embed import DashboardTokenError, mint_scoped_dashboard_token
 
-_EMBED_HEIGHT = 900
+_COMPONENT_HEIGHT = 900
+
+
+@st.cache_data(ttl=3000, show_spinner=False)
+def _scoped_dashboard_token() -> str:
+    """Mint and cache a dashboard-scoped App-SP token for under its 1h TTL."""
+    return mint_scoped_dashboard_token()
+
+
+def _show_workspace_link(reason: str | None = None) -> None:
+    if reason:
+        st.warning(f"The in-app dashboard is temporarily unavailable: {reason}.")
+    st.link_button(
+        "Open Customer 360 dashboard in Databricks",
+        config.dashboard_published_url(),
+        type="primary",
+    )
+    st.caption(
+        "The dashboard opens in the Databricks workspace. In-app embedding uses "
+        "the external-user embedding preview and falls back here if scoped "
+        "authorization is unavailable."
+    )
+
 
 st.title("📊 Analytics dashboard")
-st.caption(
-    "Embedded AI/BI (Lakeview) dashboard. Broader analytics in-app — no need to "
-    "leave for the workspace UI."
-)
+st.caption("Customer 360 analytics, securely embedded from Databricks AI/BI.")
 
 dashboard_id = config.dashboard_id_optional()
 if not dashboard_id:
@@ -43,20 +52,43 @@ if not dashboard_id:
     st.stop()
 
 try:
-    embed_url = config.dashboard_embed_url()
-except RuntimeError as exc:  # pragma: no cover - surfaced live in the app
-    st.error(f"Cannot build the dashboard embed URL: `{exc}`")
+    scoped_token = _scoped_dashboard_token()
+    component_config = {
+        "instanceUrl": config.host(),
+        "workspaceId": config.workspace_id(),
+        "dashboardId": dashboard_id,
+        "token": scoped_token,
+    }
+    fallback_url = config.dashboard_published_url()
+except (DashboardTokenError, RuntimeError) as exc:
+    _show_workspace_link(str(exc))
     st.stop()
 
-# The dashboard renders here only if the app's domain is allowlisted for embed
-# in the workspace (see module docstring). Otherwise X-Frame-Options blocks it
-# and the frame stays blank — an admin allowlist step is required at deploy time.
-st.components.v1.iframe(embed_url, height=_EMBED_HEIGHT)
+# JSON encoding avoids interpolating unescaped configuration into executable JS.
+# The token remains inside the sandboxed component document and is never logged.
+component_config_json = json.dumps(component_config).replace("</", "<\\/")
+component_html = f"""
+<div id="dashboard" style="height: {_COMPONENT_HEIGHT}px; width: 100%;"></div>
+<div id="embed-error" style="display:none; padding:24px; font-family:sans-serif;">
+  <p>The in-app dashboard could not initialize.</p>
+  <a href={json.dumps(fallback_url)} target="_blank" rel="noopener noreferrer">
+    Open Customer 360 dashboard in Databricks
+  </a>
+</div>
+<script type="module">
+  import {{ DatabricksDashboard }} from
+    'https://cdn.jsdelivr.net/npm/@databricks/aibi-client@0.0.0-alpha.7/+esm';
 
-with st.expander("Dashboard not showing?"):
-    st.markdown(
-        "If the frame is blank, the app's domain likely isn't allowlisted for "
-        "dashboard embedding yet. A workspace admin must add this app's host "
-        "under **Settings → Security → External Access → Embed Dashboard**. "
-        "Without it, the browser blocks the iframe via `X-Frame-Options`."
-    )
+  const settings = {component_config_json};
+  const container = document.getElementById('dashboard');
+  try {{
+    const dashboard = new DatabricksDashboard({{ ...settings, container }});
+    await dashboard.initialize();
+  }} catch (error) {{
+    console.error('Databricks AI/BI embed initialization failed', error);
+    container.style.display = 'none';
+    document.getElementById('embed-error').style.display = 'block';
+  }}
+</script>
+"""
+st.components.v1.html(component_html, height=_COMPONENT_HEIGHT, scrolling=True)
