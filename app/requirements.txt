@@ -1,0 +1,14 @@
+# Runtime dependencies for the Customer 360 Streamlit git-source app.
+#
+# The Databricks Apps runtime installs these at deploy time (git-source apps
+# install from the requirements.txt at the app source root — this file, app/).
+# Pins are kept consistent with app/pyproject.toml (the local dev source of
+# truth). The T3a external FastAPI app is a SEPARATE app/source dir and is NOT
+# part of this Streamlit build, so fastapi/uvicorn/httpx are intentionally
+# absent here — this app ships only what the Streamlit runtime needs.
+
+streamlit>=1.40           # the app framework (app/streamlit_app.py, pages/)
+databricks-sdk>=0.40      # WorkspaceClient: OBO tokens, Lakebase creds, Jobs API
+psycopg[binary]>=3.2      # Lakebase Postgres driver (app/lib/db.py)
+psycopg-pool>=3.2         # connection pool for Lakebase (app/lib/db.py)
+pandas>=2.0               # DataFrames for the customer/reports tables (UI)

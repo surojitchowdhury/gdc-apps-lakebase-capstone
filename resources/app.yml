@@ -1,55 +1,76 @@
-# Databricks Asset Bundle — app resource definition for the Customer 360 app.
+# Databricks Asset Bundle — app resource for the Customer 360 Streamlit app.
 #
-# WHY THIS FILE (T6): OBO (on-behalf-of-user) scopes are NOT part of the
-# app.yaml runtime schema (which supports only `command` and `env`). They are a
-# property of the *app resource*, declared here as `user_api_scopes`.
+# T8: this makes `customer360` a GIT-SOURCE app. `git_repository` + `git_source`
+# tell Databricks to pull the app source from GitHub (path app/ inside the repo)
+# at every `bundle run` — the source is NOT uploaded from a local workspace
+# folder. Verified against `databricks bundle schema` (CLI v1.6.0):
+#   resources.App.git_repository -> apps.GitRepository {provider, url}
+#   resources.App.git_source     -> apps.GitSource {branch, commit, tag,
+#                                                    source_code_path}
 #
-# Verified against `databricks bundle schema`:
-#   $defs .../bundle/config/resources.App -> properties.user_api_scopes
-#   => {"description": "[Public Preview]", "$ref": ".../slice/string"}  (list of strings)
-# i.e. `user_api_scopes` is a list-of-string field on the App resource. This is
-# also what T8's spec calls for: "user_api_scopes: [sql, dashboards.genie]".
+# CRITICAL: because git_source is set, there is NO app-level `source_code_path`
+# key (DABs rejects "both git_source and source_code_path are set"). The path to
+# the app code lives INSIDE git_source.source_code_path (= app/).
 #
-# SCOPE OF T6: this file contributes the `user_api_scopes` (the review's
-# BLOCKING-1 fix). The rest of the git-source-app wiring — `git_repository`,
-# `git_source` (branch + source_code_path: app/), the resource bindings
-# (sql_warehouse / database / genie_space / forward-ETL job), and the
-# `databricks.yml` `include:` + variables — is owned by T8. Until T8 adds the
-# `include:` for resources/ in databricks.yml, this file is inert (no bundle
-# command loads it), so it cannot break validation today.
-#
-# The two scopes below MUST stay exactly in sync with OBO_SCOPES in
-# app/lib/auth.py: ("sql", "dashboards.genie"). Do NOT add iam.current-user:read
-# / iam.access-control:read (platform auto-adds them) or `dashboards` / `postgres`
-# (rejected by the Apps API).
+# app.yaml (in app/) stays the RUNTIME config (command + env). This file is the
+# BUNDLE resource: git-source wiring, OBO scopes, and the resource bindings the
+# app depends on. They do not duplicate each other.
 
 resources:
   apps:
     customer360:
       name: "customer360"
-      description: "Customer 360 — Streamlit app on Databricks Apps (Lakebase capstone)."
+      description: "Customer 360 — Streamlit git-source app on Databricks Apps (Lakebase capstone)."
 
-      # OBO scopes requested by the app (Public Preview). This is the correct
-      # home for OBO scopes — NOT app/app.yaml.
+      # --- Git-source app (T8) -----------------------------------------------
+      # provider is case-insensitive per the schema; "github" is accepted.
+      git_repository:
+        provider: github
+        url: ${var.git_repo_url}
+      git_source:
+        branch: ${var.git_branch}
+        # Relative path to the Streamlit app source within the repo. app.yaml,
+        # streamlit_app.py, requirements.txt, lib/ and pages/ all live here.
+        source_code_path: app/
+      # NB: NO top-level `source_code_path` here — git-source ONLY.
+
+      # OBO (on-behalf-of-user) scopes requested by the app (Public Preview).
+      # These live on the app RESOURCE, not app.yaml. Must stay exactly in sync
+      # with OBO_SCOPES in app/lib/auth.py: ("sql", "dashboards.genie"). Do NOT
+      # add iam.* (platform auto-adds them) or dashboards / postgres (rejected).
       user_api_scopes:
         - "sql"               # SQL warehouse queries as the calling user (app/lib/sql.py)
         - "dashboards.genie"  # Genie Conversation API as the calling user (app/lib/genie.py)
 
-      # --- T8 completes the git-source-app wiring below --------------------------
-      # git_repository:
-      #   provider: github
-      #   url: <git_repo_url>
-      # git_source:
-      #   branch: <git_branch>
-      #   source_code_path: app/          # Streamlit app source dir
-      # resources:
-      #   - name: sql-warehouse
-      #     sql_warehouse: { id: <warehouse_id>, permission: CAN_USE }
-      #   - name: lakebase
-      #     database: { instance_name: capstone-pg, permission: CAN_CONNECT_AND_CREATE }
-      #   - name: genie-space
-      #     genie_space: { id: <genie_space_id>, permission: CAN_RUN }
-      #   - name: forward-etl-job
-      #     job: { id: <forward_etl_job_id>, permission: CAN_MANAGE_RUN }
-      #   NOTE: the app.yaml `FORWARD_ETL_JOB_ID` env valueFrom references the
-      #   `forward-etl-job` resource name above.
+      # --- App resource bindings ---------------------------------------------
+      # The resources the app depends on. Each `name` is the handle the app
+      # runtime references (app.yaml env `value_from`). Permission enums verified
+      # via `databricks bundle schema`.
+      resources:
+        - name: "sql-warehouse"
+          description: "SQL warehouse for OBO warehouse queries."
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+
+        - name: "lakebase"
+          description: "Lakebase Postgres instance (synced tables + app staging writes)."
+          database:
+            instance_name: ${var.lakebase_instance}
+            database_name: ${var.lakebase_database}
+            permission: CAN_CONNECT_AND_CREATE
+
+        - name: "genie-space"
+          description: "Genie space for the Genie chat page."
+          genie_space:
+            name: "genie-space"
+            space_id: ${var.genie_space_id}
+            permission: CAN_RUN
+
+        - name: "forward-etl-job"
+          description: "Forward-ETL job (T7) triggered on demand from the Reports page."
+          job:
+            # Bound to the bundle-managed job declared in resources/jobs.yml, so
+            # the app always points at the current job id (no hard-coded id).
+            id: ${resources.jobs.forward_etl.id}
+            permission: CAN_MANAGE_RUN
