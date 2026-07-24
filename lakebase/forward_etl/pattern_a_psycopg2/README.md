@@ -28,8 +28,12 @@
 3. **MERGE** the rows into the gold Delta target on the table's primary key
    (`WHEN MATCHED UPDATE` / `WHEN NOT MATCHED INSERT`), so re-runs converge to
    the same result.
-4. **Mark processed** — only after the MERGE commits — `UPDATE *_staging SET
-   processed = true WHERE <pk> = ANY(...)` for exactly the rows merged.
+4. **Mark processed** — only after the MERGE commits — for exactly the rows
+   merged. **Notes** are marked by their IDENTITY `id` (unique per insert, never
+   overwritten, so key-only is safe). **Overrides** are marked **version-aware**:
+   `UPDATE ... SET processed = true WHERE customer_id = %s AND updated_at = %s
+   AND processed = false` for each `(customer_id, updated_at)` actually merged
+   (see "Version-safety" below).
 5. **Print a summary** (read / merged / marked counts + gold rowcounts) and
    surface it via `dbutils.notebook.exit(...)` so the Jobs API run output
    carries it back to the app.
@@ -42,6 +46,34 @@ simply re-merges those rows (MERGE on the PK is idempotent) and then marks them
 processed. So a partial failure never loses data and never double-writes, and
 the whole job is safe to re-run. The `processed = false` filter + idempotent
 MERGE together make re-running with no new rows a **no-op**.
+
+### Version-safety (upsert-keyed overrides)
+
+`customer_segment_overrides_staging` is an **UPSERT** table keyed on
+`customer_id`: the app overwrites a customer's single row on each override
+(bumping `updated_at`, resetting `processed = false`). That creates a race the
+notes table does not have — between the ETL's `SELECT` and its mark-processed
+`UPDATE`, the app can overwrite that customer's row with a **newer** value.
+`max_concurrent_runs = 1` stops overlapping ETL jobs but **not** concurrent app
+writes.
+
+A key-only `UPDATE ... WHERE customer_id = ...` would then mark the *newer*,
+never-merged version `processed = true`, and it would silently never reach gold
+(**data loss**). To prevent this, the mark step is **version-aware**: for each
+`(customer_id, updated_at)` we actually read+merged, we run
+
+```sql
+UPDATE customer_segment_overrides_staging
+SET processed = true
+WHERE customer_id = %s AND updated_at = %s AND processed = false
+```
+
+(parameterized — `customer_id` and `updated_at` are bound, never f-strung). If
+the app wrote a newer override in between, that row's `updated_at` differs, so
+the `UPDATE` matches **0 rows** and the newer version stays `processed = false`
+— the next run merges it into gold. **Notes** are marked by their IDENTITY `id`
+(unique per insert, never overwritten), so a key-only mark is already safe there
+and is left as-is.
 
 ## Gold target mapping
 

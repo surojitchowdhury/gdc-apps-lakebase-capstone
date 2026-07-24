@@ -2,6 +2,12 @@
 # ruff: noqa: E402, F821
 #   E402: notebook cells import where needed, not all at the top of the file.
 #   F821: `spark` and `dbutils` are globals injected by the Databricks runtime.
+# This leading code cell is comments-only; the notebook content begins in the
+# next cell. Keeping the ruff directive in its OWN cell preserves the Databricks
+# notebook structure (a markdown cell must START with `# MAGIC %md`).
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC # Forward ETL — Pattern A (psycopg + MERGE INTO Delta)
 # MAGIC
@@ -293,14 +299,27 @@ def forward_etl_overrides(conn) -> dict:
         """
     )
 
-    cust_ids = [r[0] for r in rows]
+    # Mark processed VERSION-AWARE-LY. customer_segment_overrides_staging is an
+    # UPSERT table keyed on customer_id, so the app can overwrite a customer's
+    # row with a NEWER value (new updated_at, processed reset to false) BETWEEN
+    # our SELECT above and this UPDATE. A key-only UPDATE would then mark that
+    # newer, never-merged version processed=true and it would silently never
+    # reach gold. So we scope the UPDATE to the EXACT (customer_id, updated_at)
+    # we read+merged, and require processed=false: if the app wrote a newer
+    # override in between, its updated_at differs and its row is NOT marked —
+    # the next run picks it up and merges the newer value. (Notes are keyed on
+    # the IDENTITY `id`, unique per insert and never overwritten, so they have
+    # no such exposure and mark by id alone is safe.)
+    pairs = [(r[0], r[3]) for r in rows]  # (customer_id, updated_at) actually merged
+    marked = 0
     with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE customer_segment_overrides_staging SET processed = true "
-            "WHERE customer_id = ANY(%s)",
-            (cust_ids,),
-        )
-        marked = cur.rowcount
+        for customer_id, updated_at in pairs:
+            cur.execute(
+                "UPDATE customer_segment_overrides_staging SET processed = true "
+                "WHERE customer_id = %s AND updated_at = %s AND processed = false",
+                (customer_id, updated_at),
+            )
+            marked += cur.rowcount
     return {"read": read_n, "merged": read_n, "marked": marked}
 
 

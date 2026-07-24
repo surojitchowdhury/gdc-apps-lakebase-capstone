@@ -26,6 +26,9 @@ from lib import jobs
 
 # session_state keys — namespaced so they don't collide with other pages.
 _SS_RUN_ID = "forward_etl_run_id"
+# Set once the tracked run reaches a terminal state, so we STOP auto-polling
+# (the fragment is re-armed with run_every=None on the next full script run).
+_SS_TERMINAL = "forward_etl_run_terminal"
 
 # How often the status fragment re-polls the run while it is in flight.
 _POLL_SECONDS = 5
@@ -66,35 +69,19 @@ if st.button("▶️ Run forward-ETL", type="primary"):
     try:
         run_id = jobs.run_forward_etl()
         st.session_state[_SS_RUN_ID] = run_id
+        st.session_state[_SS_TERMINAL] = False  # fresh run: (re)enable polling
         st.success(f"Triggered forward-ETL run **{run_id}**.")
     except Exception as exc:  # pragma: no cover - surfaced live in app
         st.error(f"Failed to trigger the forward-ETL job: `{exc}`")
 
 
-# --- Live status of the in-flight / last-triggered run ----------------------
-@st.fragment(run_every=_POLL_SECONDS)
-def _run_status() -> None:
-    """Poll the tracked run until terminal, refreshing every few seconds.
-
-    The fragment stops auto-refreshing (``run_every`` is only honoured while the
-    fragment reruns) once the run is terminal by simply not scheduling further
-    work — we render the terminal state and return.
-    """
-    run_id = st.session_state.get(_SS_RUN_ID)
-    if not run_id:
-        return
-
-    try:
-        status = jobs.get_run(run_id)
-    except Exception as exc:  # pragma: no cover - surfaced live in app
-        st.error(f"Could not fetch run {run_id} status: `{exc}`")
-        return
-
+def _render_status(status: dict) -> None:
+    """Render a run's status block (shared by the polling + terminal paths)."""
     life_cycle = status["life_cycle_state"]
     result = status["result_state"]
     url = status["run_page_url"]
 
-    st.subheader(f"Run {run_id}")
+    st.subheader(f"Run {status['run_id']}")
     if not status["is_terminal"]:
         st.info(f"⏳ {life_cycle or 'PENDING'} — polling every {_POLL_SECONDS}s…")
         st.progress(0.5, text=status.get("state_message") or "Running…")
@@ -105,9 +92,38 @@ def _run_status() -> None:
             f"❌ {life_cycle} / {result or 'UNKNOWN'}"
             + (f" — {status['state_message']}" if status.get("state_message") else "")
         )
-
     if url:
         st.link_button("Open run in workspace ↗", url)
+
+
+# --- Live status of the in-flight / last-triggered run ----------------------
+# Auto-refresh ONLY while the run is non-terminal. Once terminal we set
+# _SS_TERMINAL and trigger a single full rerun; the fragment is then decorated
+# with run_every=None, so it renders the final status once and STOPS hitting the
+# Jobs API — no polling after SUCCESS/FAILED/etc.
+_run_every = None if st.session_state.get(_SS_TERMINAL) else _POLL_SECONDS
+
+
+@st.fragment(run_every=_run_every)
+def _run_status() -> None:
+    run_id = st.session_state.get(_SS_RUN_ID)
+    if not run_id:
+        return
+
+    try:
+        status = jobs.get_run(run_id)
+    except Exception as exc:  # pragma: no cover - surfaced live in app
+        st.error(f"Could not fetch run {run_id} status: `{exc}`")
+        return
+
+    _render_status(status)
+
+    # First time we observe a terminal state, record it and do ONE full-app
+    # rerun (scope="app") so the module-level `_run_every` is recomputed to None
+    # and the fragment is re-created with auto-refresh disarmed.
+    if status["is_terminal"] and not st.session_state.get(_SS_TERMINAL):
+        st.session_state[_SS_TERMINAL] = True
+        st.rerun(scope="app")
 
 
 _run_status()
