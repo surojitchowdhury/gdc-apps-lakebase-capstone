@@ -1,79 +1,63 @@
-# Databricks Asset Bundle — declarative synced-table specs (reverse ETL, T1).
+# Databricks Asset Bundle — reverse-ETL synced tables (T1): DOCUMENTATION ONLY.
 #
-# T8: the YAML equivalent of T1's psycopg/SDK-created synced tables, so the three
-# reverse-ETL synced tables are BUNDLE-MANAGED and don't drift from ad-hoc
-# creation. CLI v1.6.0 has a native `synced_database_tables` resource type
-# (verified via `databricks bundle schema`:
-#   resources.SyncedDatabaseTable {name, database_instance_name,
-#     logical_database_name, spec: database.SyncedTableSpec}
-#   spec.scheduling_policy enum: CONTINUOUS | TRIGGERED | SNAPSHOT
-#   spec.new_pipeline_spec {storage_catalog, storage_schema}).
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │ DELIBERATELY NOT A BUNDLE RESOURCE (Option B — cross-review BLOCKING fix).  │
+# │ There is NO active `resources:` block in this file, so `bundle deploy`      │
+# │ does NOT attempt to create these synced tables. They remain managed by the  │
+# │ T1 script lakebase/reverse_etl/create_synced_tables.py (already ONLINE).    │
+# └───────────────────────────────────────────────────────────────────────────┘
 #
-# So we DON'T need to fall back to referencing create_synced_tables.py — the
-# native resource type validates. Mirrors the T1 script exactly:
-#   customers_synced     <- gold.customers     CONTINUOUS
-#   transactions_synced  <- gold.transactions  CONTINUOUS
-#   products_synced      <- gold.products      TRIGGERED (hourly, slow-changing)
+# WHY NOT bundle-managed (why we did NOT keep them as synced_database_tables):
 #
-# The synced tables land in the Lakebase-registered UC catalog (pg_uc_catalog),
-# surfaced in Postgres db=capstone_db / schema=public. Each table's backing DLT
-# pipeline writes its event-log + staging to a SEPARATE storage-backed catalog
-# via new_pipeline_spec.storage_catalog/_schema — this is the T1 fix that made
-# the tables come ONLINE (pg_uc_catalog is connection-backed with no storage
-# root, so without it the pipeline fails UNITY_CATALOG_INITIALIZATION_FAILED).
+#  1. They ALREADY EXIST and are ONLINE (serving the app's reverse-ETL path):
+#       suro_capstone_lb_sbx.public.customers_synced     SYNCED_TABLE_ONLINE_CONTINUOUS_UPDATE
+#       suro_capstone_lb_sbx.public.transactions_synced  SYNCED_TABLE_ONLINE_CONTINUOUS_UPDATE
+#       suro_capstone_lb_sbx.public.products_synced       SYNCED_TABLE_ONLINE_NO_PENDING_UPDATE
+#     DABs does not auto-adopt existing resources by name — a bundle-managed
+#     synced_database_tables block would make the first `bundle deploy` attempt a
+#     CREATE and fail with an already-exists conflict.
 #
-# NOTE ON THE HOURLY REFRESH: the T1 script also created a separate Job with a
-# quartz-cron trigger to refresh products_synced hourly (a TRIGGERED synced
-# table's pipeline only runs when invoked). That trigger job depends on the
-# pipeline_id, which only exists AFTER the synced table is provisioned, so it is
-# NOT expressed here (it can't reference a not-yet-created pipeline at validate
-# time). It remains a post-deploy step: run create_synced_tables.py once (it
-# reuses the existing tables and (re)creates the hourly refresh job), or add a
-# jobs.yml pipeline_task once the pipeline id is known.
-
-resources:
-  synced_database_tables:
-    # --- CONTINUOUS: app must reflect churn/LTV/new-txn within seconds --------
-    customers_synced:
-      name: ${var.pg_uc_catalog}.public.customers_synced
-      database_instance_name: ${var.lakebase_instance}
-      logical_database_name: ${var.lakebase_database}
-      spec:
-        source_table_full_name: ${var.catalog}.${var.schema}.customers
-        primary_key_columns:
-          - customer_id
-        scheduling_policy: CONTINUOUS
-        create_database_objects_if_missing: true
-        new_pipeline_spec:
-          storage_catalog: ${var.pg_sync_storage_catalog}
-          storage_schema: ${var.pg_sync_storage_schema}
-
-    transactions_synced:
-      name: ${var.pg_uc_catalog}.public.transactions_synced
-      database_instance_name: ${var.lakebase_instance}
-      logical_database_name: ${var.lakebase_database}
-      spec:
-        source_table_full_name: ${var.catalog}.${var.schema}.transactions
-        primary_key_columns:
-          - transaction_id
-        scheduling_policy: CONTINUOUS
-        create_database_objects_if_missing: true
-        new_pipeline_spec:
-          storage_catalog: ${var.pg_sync_storage_catalog}
-          storage_schema: ${var.pg_sync_storage_schema}
-
-    # --- TRIGGERED: slow-changing catalog (200 rows); hourly is plenty --------
-    # Cheaper than an always-on pipeline. See the hourly-refresh note above.
-    products_synced:
-      name: ${var.pg_uc_catalog}.public.products_synced
-      database_instance_name: ${var.lakebase_instance}
-      logical_database_name: ${var.lakebase_database}
-      spec:
-        source_table_full_name: ${var.catalog}.${var.schema}.products
-        primary_key_columns:
-          - product_id
-        scheduling_policy: TRIGGERED
-        create_database_objects_if_missing: true
-        new_pipeline_spec:
-          storage_catalog: ${var.pg_sync_storage_catalog}
-          storage_schema: ${var.pg_sync_storage_schema}
+#  2. Binding them into bundle state (Option A) is NOT safe here:
+#     - `databricks bundle generate` has no synced-table generator at CLI v1.6.0
+#       (only alert/app/dashboard/genie-space/job/pipeline), so the standard
+#       generate→bind→deploy migration path does not cover this resource type.
+#     - The create-only fields DON'T round-trip: `databricks database
+#       get-synced-database-table` returns only {source_table_full_name,
+#       primary_key_columns, scheduling_policy}. It does NOT echo back
+#       `new_pipeline_spec.storage_catalog/storage_schema` or
+#       `create_database_objects_if_missing` (those are consumed at creation into
+#       a live pipeline_id). So a declared bundle spec can never exactly match the
+#       read-back state, and a post-bind `deploy` is NOT guaranteed to be a
+#       no-op/UPDATE — it could try to REPLACE (destroy+recreate) the ONLINE
+#       tables. That risk is unacceptable on the live reverse-ETL path.
+#
+#     Given the ONLINE tables and the non-round-trippable spec, Option B (keep
+#     them out of the bundle) is the cleaner, deploy-safe choice.
+#
+# HOW THEY STAY MANAGED / how to reconcile later:
+#   The T1 script is idempotent and re-runnable — it leaves existing tables in
+#   place (only `--recreate` rebuilds) and (re)creates the products_synced hourly
+#   refresh job. Run it to manage/repair the synced tables:
+#     uv run lakebase/reverse_etl/create_synced_tables.py
+#   If a future CLI adds first-class synced-table generate/bind whose declared
+#   spec round-trips cleanly, migrate them into the bundle then (generate →
+#   verify a `deploy` plan is a no-op → bind), and restore the resources block
+#   below.
+#
+# ── Intended spec (for reference; mirrors create_synced_tables.py) ────────────
+# All land in the Lakebase-registered UC catalog (pg_uc_catalog), surfaced in
+# Postgres db=capstone_db / schema=public. Each backing DLT pipeline writes its
+# event-log + staging to a storage-backed catalog (the T1 fix that made them
+# come ONLINE, since pg_uc_catalog is connection-backed with no storage root):
+#
+# resources:
+#   synced_database_tables:
+#     customers_synced:      # CONTINUOUS  <- suro_cat.app_capstone.customers      PK customer_id
+#     transactions_synced:   # CONTINUOUS  <- suro_cat.app_capstone.transactions   PK transaction_id
+#     products_synced:       # TRIGGERED   <- suro_cat.app_capstone.products        PK product_id
+#       # new_pipeline_spec.storage_catalog: suro_serverless_sandbox_24july_catalog
+#       # new_pipeline_spec.storage_schema:  lakebase_sync_storage
+#
+# products_synced is TRIGGERED (slow-changing 200-row catalog); its hourly
+# refresh job is created by create_synced_tables.py (needs the runtime
+# pipeline_id, which only exists after provisioning).

@@ -13,6 +13,21 @@
 #
 # base_parameters mirror the notebook's dbutils.widgets (catalog, schema,
 # pg_instance, pg_database, pg_host), wired from ${var.*}.
+#
+# RUN IDENTITY (cross-review fix): this job declares NO `run_as`, so the notebook
+# runs as the job OWNER — i.e. whoever deploys the bundle (the deploying
+# user/principal), NOT the app service principal. The app SP is granted
+# CAN_MANAGE_RUN on this job (resources/app.yml `forward-etl-job` binding), which
+# lets the app TRIGGER the job on behalf of the Reports page — but triggering a
+# job does NOT change its run_as identity. So the notebook connects to Lakebase
+# (and writes gold Delta) as the deployer/owner, not the app SP.
+#   To make forward-ETL run AS the app SP instead, add a `run_as` block below
+#   (`run_as: { service_principal_name: <app-sp-application-id> }`). The app SP's
+#   application id is not known until AFTER the first `bundle deploy` (see
+#   `databricks apps get customer360` -> service_principal_id), so this would be
+#   wired at deploy time and require a re-deploy. Left unset here: the deployer is
+#   a workspace admin with the needed Lakebase + UC grants, so owner-run is the
+#   least-surprising default for the sandbox.
 
 resources:
   jobs:
