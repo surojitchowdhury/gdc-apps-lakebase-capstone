@@ -69,9 +69,11 @@ st.session_state.setdefault("page", 1)
 # --- Cached fetch -----------------------------------------------------------
 # Cache the current page so widget interactions that don't change inputs (e.g.
 # selecting a row) don't re-query Lakebase. Returns a plain dict so it is cache-
-# friendly. Writes on the detail page clear this cache so changes appear.
+# friendly. The trailing `reads_version` arg is a scoped cache-buster: the
+# detail page bumps st.session_state["reads_version"] after a write, so the
+# list re-fetches on next view without evicting every other cached entry.
 @st.cache_data(ttl=30, show_spinner="Loading customers…")
-def _load_page(segment, min_ltv, max_churn, page, page_size):
+def _load_page(segment, min_ltv, max_churn, page, page_size, reads_version):
     return list_customers(
         segment=segment,
         min_ltv=min_ltv,
@@ -82,8 +84,9 @@ def _load_page(segment, min_ltv, max_churn, page, page_size):
 
 
 page = st.session_state["page"]
+reads_version = st.session_state.get("reads_version", 0)
 try:
-    result = _load_page(segment_arg, min_ltv_arg, max_churn_arg, page, page_size)
+    result = _load_page(segment_arg, min_ltv_arg, max_churn_arg, page, page_size, reads_version)
 except Exception as exc:  # pragma: no cover - surfaced live in the app
     st.error(
         "Could not load customers from Lakebase. The synced tables "

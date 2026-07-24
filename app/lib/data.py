@@ -188,6 +188,25 @@ def get_customer(customer_id: str) -> Customer:
     return Customer(profile=profile, transactions=transactions)
 
 
+def list_notes(customer_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    """Return a customer's notes from ``customer_notes_staging`` (app SP).
+
+    Most-recent first, capped at ``limit`` rows. Parameterized; used by the
+    Notes tab to show existing notes (including one just added, after the cache
+    is invalidated).
+    """
+    limit = max(1, min(int(limit), 200))
+    notes_sql = (
+        "SELECT id, customer_id, note, actor_email, created_at, processed "
+        "FROM customer_notes_staging WHERE customer_id = %s "
+        "ORDER BY created_at DESC, id DESC LIMIT %s"
+    )
+    with lakebase_sp() as conn, conn.cursor() as cur:
+        cur.execute(notes_sql, [customer_id, limit])
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
 # --- Metrics (gold cross-table aggregates, via SQL warehouse + OBO) ---------
 def _gold(table: str) -> str:
     """Fully-qualified gold table name from env (CAPSTONE_CATALOG/SCHEMA).
@@ -217,6 +236,13 @@ def get_customer_metrics(customer_id: str, obo: WorkspaceClient) -> dict[str, An
     recency, distinct products/categories, and top spend channel + category.
     Returns a single-row dict of aggregates (zero-filled when the customer has no
     transactions in gold).
+
+    Numeric aggregates are returned as real Python ``float`` / ``int`` — NOT the
+    raw strings the API hands back. The Statement Execution API returns every
+    ``data_array`` value as a STRING (even numbers), so we coerce at this
+    boundary; callers (e.g. the Metrics tab's ``:,.2f`` formatting) get real
+    numbers and never hit a ``ValueError`` on a string. Date columns are left as
+    their string form; ``top_channel`` / ``top_category`` are strings by nature.
 
     Raises ``ValueError`` if ``obo`` is ``None`` — the caller (the Metrics tab)
     must surface the OBO-not-enabled message instead of falling back to the SP.
@@ -270,14 +296,60 @@ def get_customer_metrics(customer_id: str, obo: WorkspaceClient) -> dict[str, An
     channel_rows = wsql.query(obo, top_channel_sql, params)
     category_rows = wsql.query(obo, top_category_sql, params)
 
-    metrics: dict[str, Any] = metrics_rows[0] if metrics_rows else {}
+    raw: dict[str, Any] = metrics_rows[0] if metrics_rows else {}
+
+    # Coerce the string-valued aggregates the Statement Execution API returns
+    # into real numbers so the UI can format them directly. Integer-valued
+    # counts -> int; money/averages -> float. Missing/None -> 0 (a customer with
+    # zero transactions still yields a well-formed all-zero metrics dict).
+    int_fields = (
+        "transaction_count",
+        "distinct_products",
+        "distinct_categories",
+        "completed_count",
+    )
+    float_fields = (
+        "total_spend",
+        "avg_transaction_amount",
+        "max_transaction_amount",
+    )
+    metrics: dict[str, Any] = {}
+    for f in int_fields:
+        metrics[f] = _as_int(raw.get(f))
+    for f in float_fields:
+        metrics[f] = _as_float(raw.get(f))
+    # Date columns stay as their string representation (or None).
+    metrics["last_transaction_date"] = raw.get("last_transaction_date")
+    metrics["first_transaction_date"] = raw.get("first_transaction_date")
+
     metrics["top_channel"] = channel_rows[0]["channel"] if channel_rows else None
-    metrics["top_channel_spend"] = channel_rows[0]["channel_spend"] if channel_rows else None
+    metrics["top_channel_spend"] = (
+        _as_float(channel_rows[0]["channel_spend"]) if channel_rows else None
+    )
     metrics["top_category"] = category_rows[0]["category"] if category_rows else None
     metrics["top_category_spend"] = (
-        category_rows[0]["category_spend"] if category_rows else None
+        _as_float(category_rows[0]["category_spend"]) if category_rows else None
     )
     return metrics
+
+
+def _as_float(value: Any) -> float:
+    """Coerce a Statement-Execution string (or None/number) to ``float``.
+
+    The API returns numeric cells as strings; ``None`` / empty -> ``0.0``."""
+    if value is None or value == "":
+        return 0.0
+    return float(value)
+
+
+def _as_int(value: Any) -> int:
+    """Coerce a Statement-Execution string (or None/number) to ``int``.
+
+    Parses via ``float`` first so values like ``"11.0"`` are handled; ``None`` /
+    empty -> ``0``."""
+    if value is None or value == "":
+        return 0
+    return int(float(value))
 
 
 # --- Writes (Lakebase staging + audit, single transaction, via app SP) ------

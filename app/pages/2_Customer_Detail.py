@@ -20,7 +20,13 @@ from __future__ import annotations
 import streamlit as st
 
 from lib.auth import current_user_email, obo_client
-from lib.data import add_note, get_customer, get_customer_metrics, override_segment
+from lib.data import (
+    add_note,
+    get_customer,
+    get_customer_metrics,
+    list_notes,
+    override_segment,
+)
 
 st.title("🔎 Customer detail")
 
@@ -32,15 +38,30 @@ if not customer_id:
     st.stop()
 
 
-# --- Cached profile read (SP) -----------------------------------------------
+# --- Cached reads (SP), scoped per customer_id ------------------------------
+# Each cached function is keyed by customer_id, so we can invalidate exactly the
+# affected customer after a write instead of clearing every user's cache.
 @st.cache_data(ttl=30, show_spinner="Loading customer…")
 def _load_customer(cid: str):
     return get_customer(cid).to_dict()
 
 
-def _clear_reads() -> None:
-    """Invalidate cached reads after a write so the change appears immediately."""
-    st.cache_data.clear()
+@st.cache_data(ttl=30, show_spinner="Loading notes…")
+def _load_notes(cid: str):
+    return list_notes(cid)
+
+
+def _invalidate_customer(cid: str) -> None:
+    """Invalidate the cached reads for THIS customer only, so a write shows up
+    immediately without evicting other users' / customers' cached data.
+
+    ``.clear(cid)`` drops just the entry for ``cid`` from each scoped cache. We
+    also bump a shared reads-version counter that the Customers list page mixes
+    into its cache key, so the list reflects the change on next view too.
+    """
+    _load_customer.clear(cid)
+    _load_notes.clear(cid)
+    st.session_state["reads_version"] = st.session_state.get("reads_version", 0) + 1
 
 
 try:
@@ -150,13 +171,36 @@ with notes_tab:
             else:
                 try:
                     res = add_note(customer_id, body.strip(), current_user_email())
-                    _clear_reads()
+                    # Invalidate only THIS customer's cached reads, so the notes
+                    # list below re-fetches (and shows the new note) on this run.
+                    _invalidate_customer(customer_id)
                     st.success(
                         f"Saved note #{res['note_id']} "
                         f"(audit row #{res['audit_id']}, same transaction)."
                     )
                 except Exception as exc:
                     st.error(f"Failed to save note: `{exc}`")
+
+    # Existing notes — read AFTER the form handler so a just-added note (whose
+    # write invalidated the scoped cache above) appears immediately.
+    st.markdown("#### Existing notes")
+    try:
+        notes = _load_notes(customer_id)
+    except Exception as exc:
+        st.error(f"Could not load notes: `{exc}`")
+        notes = []
+    if notes:
+        st.caption(f"{len(notes)} note(s), most recent first.")
+        st.dataframe(
+            notes,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "created_at": st.column_config.DatetimeColumn("Created"),
+            },
+        )
+    else:
+        st.info("No notes yet for this customer.")
 
 
 # --- Segment tab (write: idempotent upsert + audit, single txn, SP) ---------
@@ -175,7 +219,7 @@ with segment_tab:
         if submitted:
             try:
                 res = override_segment(customer_id, new_segment, current_user_email())
-                _clear_reads()
+                _invalidate_customer(customer_id)
                 st.success(
                     f"Segment override for `{res['customer_id']}` set to "
                     f"**{res['segment_id']}** (audit row #{res['audit_id']}). "
