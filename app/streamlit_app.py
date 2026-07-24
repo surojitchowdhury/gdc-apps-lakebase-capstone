@@ -75,6 +75,9 @@ customers_page = st.Page("pages/1_Customers.py", title="Customers", icon="📋")
 detail_page = st.Page("pages/2_Customer_Detail.py", title="Customer detail", icon="🔎")
 dashboard_page = st.Page("pages/3_Dashboard.py", title="Dashboard", icon="📊")
 genie_page = st.Page("pages/4_Genie.py", title="Ask Genie", icon="💬")
+reports_page = st.Page("pages/5_Reports.py", title="Reports", icon="📈")
 
-nav = st.navigation([overview_page, customers_page, detail_page, dashboard_page, genie_page])
+nav = st.navigation(
+    [overview_page, customers_page, detail_page, dashboard_page, genie_page, reports_page]
+)
 nav.run()
