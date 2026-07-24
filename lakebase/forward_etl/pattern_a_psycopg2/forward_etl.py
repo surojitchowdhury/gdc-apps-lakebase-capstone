@@ -301,23 +301,34 @@ def forward_etl_overrides(conn) -> dict:
 
     # Mark processed VERSION-AWARE-LY. customer_segment_overrides_staging is an
     # UPSERT table keyed on customer_id, so the app can overwrite a customer's
-    # row with a NEWER value (new updated_at, processed reset to false) BETWEEN
-    # our SELECT above and this UPDATE. A key-only UPDATE would then mark that
-    # newer, never-merged version processed=true and it would silently never
-    # reach gold. So we scope the UPDATE to the EXACT (customer_id, updated_at)
-    # we read+merged, and require processed=false: if the app wrote a newer
-    # override in between, its updated_at differs and its row is NOT marked —
-    # the next run picks it up and merges the newer value. (Notes are keyed on
-    # the IDENTITY `id`, unique per insert and never overwritten, so they have
-    # no such exposure and mark by id alone is safe.)
-    pairs = [(r[0], r[3]) for r in rows]  # (customer_id, updated_at) actually merged
+    # row with a NEWER value (processed reset to false) BETWEEN our SELECT above
+    # and this UPDATE. A key-only UPDATE would then mark that newer,
+    # never-merged version processed=true and it would silently never reach gold
+    # (data loss).
+    #
+    # We cannot rely on updated_at alone to identify the version we merged:
+    # updated_at DEFAULTs to now(), which in Postgres is the TRANSACTION-START
+    # time with finite precision — two rapid upserts for the same customer can
+    # share an identical updated_at, so a newer row could still match. Instead
+    # we match the FULL payload we actually read+merged — customer_id +
+    # updated_at + segment_id + actor_email — plus processed = false. If the app
+    # wrote ANY different value in between (different segment, actor, or a newer
+    # updated_at), the predicate matches 0 rows and the newer row stays
+    # processed=false for the next run to merge. This uses the SAME
+    # (customer_id, segment_id, actor_email, updated_at) tuple the gold MERGE
+    # wrote above, so gold and the mark are always consistent on one version.
+    #
+    # (Notes are keyed on the IDENTITY `id`, unique per insert and never
+    # overwritten, so they have no such exposure and mark by id alone is safe.)
+    merged_rows = [(r[0], r[3], r[1], r[2]) for r in rows]  # (customer_id, updated_at, segment_id, actor_email)
     marked = 0
     with conn.cursor() as cur:
-        for customer_id, updated_at in pairs:
+        for customer_id, updated_at, segment_id, actor_email in merged_rows:
             cur.execute(
                 "UPDATE customer_segment_overrides_staging SET processed = true "
-                "WHERE customer_id = %s AND updated_at = %s AND processed = false",
-                (customer_id, updated_at),
+                "WHERE customer_id = %s AND updated_at = %s AND segment_id = %s "
+                "AND actor_email = %s AND processed = false",
+                (customer_id, updated_at, segment_id, actor_email),
             )
             marked += cur.rowcount
     return {"read": read_n, "merged": read_n, "marked": marked}

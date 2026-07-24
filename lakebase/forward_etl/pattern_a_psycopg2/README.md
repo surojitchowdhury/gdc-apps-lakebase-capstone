@@ -59,21 +59,39 @@ writes.
 
 A key-only `UPDATE ... WHERE customer_id = ...` would then mark the *newer*,
 never-merged version `processed = true`, and it would silently never reach gold
-(**data loss**). To prevent this, the mark step is **version-aware**: for each
-`(customer_id, updated_at)` we actually read+merged, we run
+(**data loss**). To prevent this, the mark step matches the **full payload** we
+actually read+merged — for each `(customer_id, updated_at, segment_id,
+actor_email)` we run
 
 ```sql
 UPDATE customer_segment_overrides_staging
 SET processed = true
-WHERE customer_id = %s AND updated_at = %s AND processed = false
+WHERE customer_id = %s AND updated_at = %s AND segment_id = %s
+  AND actor_email = %s AND processed = false
 ```
 
-(parameterized — `customer_id` and `updated_at` are bound, never f-strung). If
-the app wrote a newer override in between, that row's `updated_at` differs, so
-the `UPDATE` matches **0 rows** and the newer version stays `processed = false`
-— the next run merges it into gold. **Notes** are marked by their IDENTITY `id`
-(unique per insert, never overwritten), so a key-only mark is already safe there
-and is left as-is.
+(parameterized — every value is bound, never f-strung).
+
+**Why the full payload, not `updated_at` alone.** `updated_at` DEFAULTs to
+`now()`, which in Postgres is the **transaction-start** time with finite
+precision — it is *not* guaranteed unique per upsert, so two rapid upserts for
+the same customer can share an identical `updated_at`. Matching on
+`updated_at` alone could therefore still mark a newer, never-merged row. By also
+comparing `segment_id` and `actor_email`, the predicate matches **0 rows**
+whenever the app wrote *any* different value in between (different segment,
+different actor, or a newer `updated_at`) — the newer row stays
+`processed = false` and the next run merges it into gold. (If a coincident write
+happened to have the identical payload *and* identical `updated_at`, the value
+is byte-for-byte what gold already holds, so marking it processed loses
+nothing.)
+
+**Gold ↔ mark consistency.** The `MERGE INTO` above writes exactly
+`(customer_id, segment_id, actor_email, updated_at)` from the rows we read, and
+the mark predicate matches that same tuple — so gold and the mark can never
+disagree about which version was materialised.
+
+**Notes** are marked by their IDENTITY `id` (unique per insert, never
+overwritten), so a key-only mark is already safe there and is left as-is.
 
 ## Gold target mapping
 
