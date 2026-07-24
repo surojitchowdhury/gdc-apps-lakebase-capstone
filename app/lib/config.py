@@ -74,6 +74,30 @@ def dashboard_id_optional() -> "str | None":
     return value or None
 
 
+def genie_space_id() -> str:
+    """Genie space id to chat against. Raises if ``GENIE_SPACE_ID`` is unset."""
+    return _require("GENIE_SPACE_ID")
+
+
+def genie_space_id_optional() -> "str | None":
+    """Return ``GENIE_SPACE_ID`` if set, else ``None`` (no raise).
+
+    Mirrors :func:`dashboard_id_optional` so the Genie page can show a friendly
+    warning instead of an error when the space has not been configured yet.
+    """
+    value = os.environ.get("GENIE_SPACE_ID")
+    return value or None
+
+
+def genie_space_url(space_id: "str | None" = None) -> str:
+    """Return the workspace deep-link URL for a Genie space.
+
+    Pattern: ``{host}/genie/rooms/{space_id}``. Defaults to the configured
+    space id when ``space_id`` is omitted.
+    """
+    return f"{host()}/genie/rooms/{space_id or genie_space_id()}"
+
+
 def dashboard_embed_url() -> str:
     """Return the fully-formed AI/BI dashboard embed URL.
 
