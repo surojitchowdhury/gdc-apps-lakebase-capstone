@@ -56,7 +56,10 @@ def host() -> str:
     Trailing slashes are stripped so callers can safely build URLs by appending
     ``/embed/...`` paths.
     """
-    return _require("DATABRICKS_HOST").rstrip("/")
+    value = _require("DATABRICKS_HOST").rstrip("/")
+    if "://" not in value:
+        value = f"https://{value}"
+    return value
 
 
 def dashboard_id() -> str:
