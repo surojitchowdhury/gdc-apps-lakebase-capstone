@@ -17,34 +17,80 @@ value fails fast rather than silently targeting the wrong instance. Lakebase
 connections use a short-lived (~1h) Databricks OAuth token as the Postgres
 password — minted per run via the SDK, never stored or logged.
 
-## Actual resources used (serverless sandbox)
+## Actual resources used (`fevm-suro-aws-classic-stable-ztrhpi`)
 
 | Thing | Value |
 |---|---|
-| CLI profile | `fe-sandbox-24july` |
-| Lakebase instance | `capstone-pg` (CU_1, PG, AVAILABLE) |
-| Postgres database | `capstone_db` |
-| **UC database catalog** | **`suro_capstone_lb_sbx`** — owned by the user, bound to `capstone-pg` / `capstone_db` |
-| Gold source tables | `suro_cat.app_capstone.{customers,transactions,products}` |
+| CLI profile | `fevm-suro-aws-classic-stable-ztrhpi` (AWS, us-east-1) |
+| Lakebase instance | `capstone-pg` (CU_1, PG 16, AVAILABLE) — **owned by the user** |
+| Postgres database | `capstone_db` (verified reachable — `SELECT version()` → PostgreSQL 16.14) |
+| **UC database catalog** | **DEFERRED** — no database catalog exists in this workspace; registration is blocked (see below) |
+| Gold source tables | `suro_aws_classic_stable_ztrhpi_catalog.lakebase_app_capstone.{customers,transactions,products}` (MANAGED DELTA) |
 | Secret scope | `capstone-surojit-chowdhury` |
 
-> **Catalog note:** synced tables land in `suro_capstone_lb_sbx.public.<name>`
-> in UC, which surfaces in Postgres under database `capstone_db`, schema
-> `public`. Do **not** use `capstone_lakebase` — that is a *different user's*
-> catalog on another workspace and raises `Cross workspace access is not
-> allowed`.
+### Catalog investigation — `suro_test_cat` and the synced-table decision
+
+Synced tables must live in a UC **database catalog** (one registered against a
+Lakebase Postgres instance). `suro_test_cat` was investigated first; findings are
+grounded in `databricks catalogs get/list` and `database get-database-catalog`:
+
+- **`suro_test_cat` exists**, owner `aec5be3d-de3c-404c-8e60-feed0f265fd3`
+  (a service principal). Its `catalog_type` is **`MANAGED_CATALOG`** — an
+  ordinary S3-backed UC catalog (an "Ontos UK motor insurance" demo with schemas
+  `claims`, `customer`, …). It is **NOT** a Lakebase database catalog and is
+  **not registered to any Postgres instance**, so it **cannot host synced
+  tables**.
+- A workspace-wide `catalogs list` shows **no database catalog at all** — every
+  catalog is `MANAGED_CATALOG` / `DELTASHARING_CATALOG` / `SYSTEM_CATALOG`.
+- Registering a **new** database catalog against `capstone-pg`
+  (`databricks database create-database-catalog suro_capstone_lb capstone-pg
+  capstone_db --create-database-if-not-exists`) fails with
+  **`User does not have CREATE CATALOG on Metastore 'metastore_aws_us_east_1'`**.
+  The metastore is owned by the `metastore_admins` group; the user owns the
+  *instance* but not the metastore privilege registration requires.
+
+**Decision — synced tables are DEFERRED (decision-tree branch 4).** Every path to
+a database catalog is genuinely blocked without a metastore admin. Staging
+tables and grants (which need only a direct Postgres connection) are fully
+delivered; the synced-table script is idempotent and provisions the three tables
+the moment a database catalog exists.
+
+> **Do not** use `capstone_lakebase` — that name is bound to a *different*
+> workspace and the user lacks `CREATE CATALOG` to register it here. The intended
+> catalog for this instance is **`suro_capstone_lb`** (`PG_UC_CATALOG` in
+> `app/.env`); synced tables would land in `suro_capstone_lb.public.<name>`,
+> surfacing in Postgres under database `capstone_db`, schema `public`.
+
+### Synced tables — DEFERRED (single unblock step)
+
+`create_synced_tables.py` detects the missing database catalog and exits **3**
+with a clean `[DEFERRED]` message (it does **not** fail loud — a metastore-admin
+prerequisite is an expected environment state, not a script bug). To unblock,
+**a metastore admin** registers the database catalog once:
+
+```bash
+databricks database create-database-catalog suro_capstone_lb capstone-pg capstone_db \
+    --create-database-if-not-exists -p fevm-suro-aws-classic-stable-ztrhpi
+```
+
+Then re-run the (unchanged, idempotent) script and the three synced tables
+provision + poll to healthy:
+
+```bash
+uv run lakebase/reverse_etl/create_synced_tables.py
+```
 
 ## Synced tables
 
 | Synced table | Source (gold) | PK | Sync mode |
 |---|---|---|---|
-| `customers_synced` | `suro_cat.app_capstone.customers` | `customer_id` | **CONTINUOUS** |
-| `transactions_synced` | `suro_cat.app_capstone.transactions` | `transaction_id` | **CONTINUOUS** |
-| `products_synced` | `suro_cat.app_capstone.products` | `product_id` | **TRIGGERED** (hourly) |
+| `customers_synced` | `…ztrhpi_catalog.lakebase_app_capstone.customers` | `customer_id` | **CONTINUOUS** |
+| `transactions_synced` | `…ztrhpi_catalog.lakebase_app_capstone.transactions` | `transaction_id` | **CONTINUOUS** |
+| `products_synced` | `…ztrhpi_catalog.lakebase_app_capstone.products` | `product_id` | **TRIGGERED** (hourly) |
 
 All three gold sources have Change Data Feed enabled
-(`delta.enableChangeDataFeed = true`), which CONTINUOUS mode requires to stream
-incremental changes.
+(`delta.enableChangeDataFeed = true`, verified via `databricks tables get`),
+which CONTINUOUS mode requires to stream incremental changes.
 
 ### CONTINUOUS vs TRIGGERED — cost / freshness tradeoff
 
