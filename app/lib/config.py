@@ -74,6 +74,11 @@ def dashboard_id_optional() -> "str | None":
     return value or None
 
 
+def workspace_id() -> str:
+    """Numeric Databricks workspace/org id required by the AI/BI JS client."""
+    return _require("DATABRICKS_WORKSPACE_ID")
+
+
 def genie_space_id() -> str:
     """Genie space id to chat against. Raises if ``GENIE_SPACE_ID`` is unset."""
     return _require("GENIE_SPACE_ID")
@@ -98,12 +103,9 @@ def genie_space_url(space_id: "str | None" = None) -> str:
     return f"{host()}/genie/rooms/{space_id or genie_space_id()}"
 
 
-def dashboard_embed_url() -> str:
-    """Return the fully-formed AI/BI dashboard embed URL.
-
-    Pattern: ``{host}/embed/dashboardsv3/{dashboard_id}`` — the workspace must
-    allowlist the app's domain (Settings → Security → External Access → Embed
-    Dashboard) for the iframe to actually render (X-Frame-Options otherwise
-    blocks it).
-    """
-    return f"{host()}/embed/dashboardsv3/{dashboard_id()}"
+def dashboard_published_url() -> str:
+    """Return the workspace deep link for the published AI/BI dashboard."""
+    return (
+        f"{host()}/dashboardsv3/{dashboard_id()}/published"
+        f"?o={workspace_id()}"
+    )
