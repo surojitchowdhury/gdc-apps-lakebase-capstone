@@ -42,6 +42,53 @@ Streamlit app (Databricks Apps, git-source)
 
 ---
 
+## App walkthrough (screenshots)
+
+The deployed Customer 360 app, one screenshot per page. All pages read live data
+(Lakebase synced tables via the SP; Metrics + Genie as the calling user via OBO).
+
+### Overview
+Landing page summarizing the customer base and app capabilities.
+
+![Overview page](docs/screenshots/01-overview.png)
+
+### Customers
+Server-side paginated, filterable customer list backed by `customers_synced`
+(sub-10ms Lakebase reads via the service principal). Row selection drives the
+detail view.
+
+![Customers list](docs/screenshots/02-customers.png)
+
+### Customer detail
+360° profile with tabs — Profile, Activity (recent transactions), Notes, and
+Segment. Notes and segment overrides are written to Lakebase staging (with an
+atomic audit-log entry); the expensive per-customer Metrics query runs against
+the SQL warehouse **as the calling user (OBO)** only when its tab is active.
+
+![Customer detail](docs/screenshots/03-customer-detail.png)
+
+### Dashboard
+Embedded AI/BI dashboard. Rendered via the external-user token flow (the app SP
+mints a short-lived, dashboard-scoped OAuth token server-side and hands it to the
+`@databricks/aibi-client` renderer), so it works cross-origin from the app domain.
+
+![Dashboard page](docs/screenshots/04-dashboard.png)
+
+### Ask Genie
+Natural-language chat over the data via the Genie Conversation API, run **as the
+calling user (OBO)**. Multi-turn context is preserved within a conversation, and
+query-result attachments render as tables.
+
+![Ask Genie page](docs/screenshots/05-genie.png)
+
+### Reports
+Triggers the forward-ETL job (staging → gold `MERGE`) via the Jobs API as the SP,
+with live run status and recent-runs history.
+
+![Reports page](docs/screenshots/06-reports.png)
+
+---
+
 ## Repo layout
 
 | Path | What |
