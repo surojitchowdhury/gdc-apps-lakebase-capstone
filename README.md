@@ -89,6 +89,32 @@ with live run status and recent-runs history.
 
 ---
 
+## T9 — Lakebase ops (screenshots)
+
+Hands-on Lakebase operations demonstrating recovery and query-performance tuning.
+Two exercises: **T9a** — database branch + point-in-time restore (PITR); **T9b** —
+adding an index and observing the query plan/latency change.
+
+### T9a — Branch + point-in-time restore
+
+![Lakebase ops 1](docs/screenshots/lakebase1.png)
+
+![Lakebase ops 2](docs/screenshots/lakebase2.png)
+
+![Lakebase ops 3](docs/screenshots/lakebase3.png)
+
+### T9b — Index & query performance (before → after)
+
+![Lakebase ops 4](docs/screenshots/lakebase4.png)
+
+![Lakebase ops 5](docs/screenshots/lakebase5.png)
+
+![Lakebase ops 6](docs/screenshots/lakebase6.png)
+
+![Lakebase ops 7](docs/screenshots/lakebase7.png)
+
+---
+
 ## Repo layout
 
 | Path | What |
